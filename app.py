@@ -7,7 +7,7 @@ import json
 import threading
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -19,6 +19,12 @@ from openai import OpenAI
 from pymongo import MongoClient, UpdateOne, errors, ASCENDING, DESCENDING
 from dotenv import load_dotenv
 import numpy as np
+
+from services.glpi_service import GLPIClient, ResolutionExtractor, GLPISyncService
+from services.ticket_router import TicketRouter
+from services.knowledge_pipeline import KnowledgePipeline
+from services.analytics import TrendAnalyzer
+from services.feedback import FeedbackLoop
 
 # FSM Import
 from fsm import initialize_fsm_for_user
@@ -37,15 +43,34 @@ SERVICE_ACCOUNT_FILE = "client.json"
 WATCH_FOLDER_ID = os.getenv("WATCH_FOLDER_ID")
 MONGO_URI = os.getenv("MONGO_URI")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GLPI_HOST = os.getenv("GLPI_HOST")
+GLPI_APP_TOKEN = os.getenv("GLPI_APP_TOKEN")
+GLPI_API_TOKEN = os.getenv("GLPI_API_TOKEN")
+DEFAULT_SUPPORT_PERSONA = os.getenv("DEFAULT_SUPPORT_PERSONA", "ol_technical_and_diagnostics")
+GLPI_SYNC_INTERVAL_SECONDS = int(os.getenv("GLPI_SYNC_INTERVAL_SECONDS", "1800"))
+KNOWLEDGE_PIPELINE_INTERVAL_SECONDS = int(os.getenv("KNOWLEDGE_PIPELINE_INTERVAL_SECONDS", "60"))
+ANALYTICS_REFRESH_INTERVAL_SECONDS = int(os.getenv("ANALYTICS_REFRESH_INTERVAL_SECONDS", "600"))
+METRICS_REFRESH_INTERVAL_SECONDS = int(os.getenv("METRICS_REFRESH_INTERVAL_SECONDS", "900"))
 
 # DB & Model Config
 DB_NAME = "obvix_lake_db"
 CHAT_HISTORY_COL = "chat_histories"
 USER_PROFILES_COL = "user_profiles"
+GLPI_RAW_TICKETS_COL = "glpi_tickets"
+GLPI_RESOLUTIONS_COL = "glpi_resolutions"
+GLPI_SYNC_STATE_COL = "glpi_sync_state"
+KNOWLEDGE_QUEUE_COL = "knowledge_pipeline_queue"
+KNOWLEDGE_ARTICLES_COL = "knowledge_articles"
+ANALYTICS_CLUSTERS_COL = "analytics_clusters"
+TICKET_ROUTING_AUDIT_COL = "ticket_routing_audit"
+FEEDBACK_EVENTS_COL = "feedback_events"
+SYSTEM_METRICS_COL = "system_metrics"
 PERSONA_COLLECTION_PREFIX = "persona_"
 EMBEDDING_MODEL = "text-embedding-3-large"
 CHAT_MODEL = "gpt-4o"
 LLM_TEMP_LOW = 0.1
+
+GLPI_ENABLED = all([GLPI_HOST, GLPI_APP_TOKEN, GLPI_API_TOKEN])
 
 # RAG & Flow Config
 MAX_HISTORY_MESSAGES_TO_RETRIEVE = 10
@@ -77,6 +102,23 @@ except errors.ConnectionFailure as e:
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 logging.info(f"✅ OpenAI client initialized with model: {CHAT_MODEL}")
+
+
+def build_embeddings(texts: List[str]) -> List[List[float]]:
+    if not texts:
+        return []
+    response = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    return [row.embedding for row in response.data]
+
+
+def short_completion(system_prompt: str, user_prompt: str, max_tokens: int = 120) -> str:
+    resp = openai_client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=LLM_TEMP_LOW,
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+        max_tokens=max_tokens,
+    )
+    return resp.choices[0].message.content.strip()
 
 # ==============================================================================
 # DRIVE HELPERS
@@ -224,6 +266,55 @@ def sync_drive_personas_task():
         logging.info("Sync cycle finished. Waiting for 60 seconds.")
         time.sleep(60)
 
+
+def glpi_sync_worker():
+    if not glpi_sync_service:
+        return
+    glpi_sync_service.run_forever(GLPI_SYNC_INTERVAL_SECONDS)
+
+
+def knowledge_pipeline_worker():
+    while True:
+        try:
+            processed = knowledge_pipeline.process_next()
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.error("Knowledge pipeline error: %s", exc)
+            processed = False
+        time.sleep(5 if processed else KNOWLEDGE_PIPELINE_INTERVAL_SECONDS)
+
+
+def analytics_worker():
+    while True:
+        try:
+            trend_analyzer.build_clusters()
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.error("Trend analyzer error: %s", exc)
+        time.sleep(ANALYTICS_REFRESH_INTERVAL_SECONDS)
+
+
+def metrics_worker():
+    while True:
+        try:
+            feedback_loop.compute_metrics()
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.error("Metrics aggregation failed: %s", exc)
+        time.sleep(METRICS_REFRESH_INTERVAL_SECONDS)
+
+
+def _spawn_daemon(name: str, target):
+    thread = threading.Thread(target=target, daemon=True, name=name)
+    thread.start()
+    return thread
+
+
+def start_background_threads():
+    _spawn_daemon("drive_sync", sync_drive_personas_task)
+    if glpi_sync_service:
+        _spawn_daemon("glpi_sync", glpi_sync_worker)
+    _spawn_daemon("knowledge_pipeline", knowledge_pipeline_worker)
+    _spawn_daemon("analytics", analytics_worker)
+    _spawn_daemon("metrics", metrics_worker)
+
 # ==============================================================================
 # HISTORY
 # ==============================================================================
@@ -284,6 +375,62 @@ def _llm_json_call(system_prompt: str, user_content: str, fallback: Dict[str, An
     except Exception as e:
         logging.warning(f"LLM JSON parse fallback: {e}")
         return fallback
+
+
+# ============================================================================== 
+# SERVICE LAYER SINGLETONS
+# ==============================================================================
+knowledge_pipeline = KnowledgePipeline(
+    db,
+    PERSONA_COLLECTION_PREFIX,
+    DEFAULT_SUPPORT_PERSONA,
+    _llm_json_call,
+    build_embeddings,
+    queue_collection=KNOWLEDGE_QUEUE_COL,
+    articles_collection=KNOWLEDGE_ARTICLES_COL,
+)
+
+ticket_router = TicketRouter(
+    db,
+    _llm_json_call,
+    build_embeddings,
+    PERSONA_COLLECTION_PREFIX,
+    audit_collection=TICKET_ROUTING_AUDIT_COL,
+)
+
+trend_analyzer = TrendAnalyzer(
+    db,
+    resolution_collection=GLPI_RESOLUTIONS_COL,
+    cluster_collection=ANALYTICS_CLUSTERS_COL,
+    summarizer=short_completion,
+)
+
+feedback_loop = FeedbackLoop(
+    db,
+    feedback_collection=FEEDBACK_EVENTS_COL,
+    metrics_collection=SYSTEM_METRICS_COL,
+)
+
+resolution_extractor = ResolutionExtractor(_llm_json_call, build_embeddings)
+
+glpi_client: Optional[GLPIClient]
+glpi_sync_service: Optional[GLPISyncService]
+if GLPI_ENABLED:
+    glpi_client = GLPIClient(GLPI_HOST, GLPI_APP_TOKEN, GLPI_API_TOKEN)
+    glpi_sync_service = GLPISyncService(
+        db,
+        glpi_client,
+        resolution_extractor,
+        resolution_handler=knowledge_pipeline.enqueue_resolution,
+        state_collection=GLPI_SYNC_STATE_COL,
+        raw_collection=GLPI_RAW_TICKETS_COL,
+        resolution_collection=GLPI_RESOLUTIONS_COL,
+    )
+    logging.info("✅ GLPI integration enabled. Host: %s", GLPI_HOST)
+else:
+    glpi_client = None
+    glpi_sync_service = None
+    logging.warning("⚠️ GLPI integration disabled – missing GLPI_* environment variables.")
 
 
 def classify_inbound_intent(user_message: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -538,9 +685,70 @@ def _extract_email(text: str) -> Optional[str]:
     m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text or "")
     return m.group(0).lower() if m else None
 
+
+# ==============================================================================
+# HEALTH CHECKS
+# ==============================================================================
+_health_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _cached_health_check(name: str, ttl_seconds: int, check_fn):
+    now = time.time()
+    cache_entry = _health_cache.get(name, {"ts": 0, "result": {}})
+    if now - cache_entry.get("ts", 0) > ttl_seconds:
+        try:
+            result = check_fn()
+        except Exception as exc:  # pragma: no cover - defensive
+            result = {"status": "error", "error": str(exc)}
+        cache_entry = {"ts": now, "result": result}
+        _health_cache[name] = cache_entry
+    return cache_entry["result"]
+
+
+def _check_mongo():
+    try:
+        mongo_client.admin.command("ping")
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+def _check_drive():
+    try:
+        drive_service.files().get(fileId=WATCH_FOLDER_ID, fields="id").execute()
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+def _check_openai():
+    try:
+        openai_client.models.list()
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+def _check_glpi():
+    if not glpi_client:
+        return {"status": "disabled", "reason": "GLPI integration not configured"}
+    return glpi_client.health_check()
+
 # ==============================================================================
 # API
 # ==============================================================================
+@app.route('/health', methods=['GET'])
+def healthcheck():
+    statuses = {
+        "app": {"status": "ok", "time": datetime.now(timezone.utc).isoformat()},
+        "mongo": _cached_health_check("mongo", 30, _check_mongo),
+        "google_drive": _cached_health_check("drive", 60, _check_drive),
+        "openai": _cached_health_check("openai", 60, _check_openai),
+    }
+    statuses["glpi"] = _cached_health_check("glpi", 120, _check_glpi)
+    return jsonify(statuses)
+
+
 @app.route('/personas', methods=['GET'])
 def list_personas():
     """Return the list of personas currently synced into MongoDB."""
@@ -556,6 +764,54 @@ def list_personas():
         if name.startswith(PERSONA_COLLECTION_PREFIX)
     )
     return jsonify({"personas": personas})
+
+
+@app.route('/tickets/route', methods=['POST'])
+def ticket_router_endpoint():
+    if not ticket_router:
+        return jsonify({"error": "Ticket router not initialized."}), 503
+    data = request.get_json() or {}
+    persona = (data.get('persona') or DEFAULT_SUPPORT_PERSONA).lower().replace(' ', '_')
+    ticket_text = (data.get('description') or data.get('message') or '').strip()
+    if not ticket_text:
+        return jsonify({"error": "description is required."}), 400
+    ticket_id = data.get('ticket_id') or str(uuid.uuid4())
+    metadata = data.get('metadata') or {}
+    result = ticket_router.route_ticket(persona, ticket_text, ticket_id=ticket_id, metadata=metadata)
+    return jsonify(result)
+
+
+@app.route('/analytics/trends', methods=['GET'])
+def analytics_trends():
+    clusters = trend_analyzer.list_clusters()
+    for cluster in clusters:
+        if cluster.get('_id'):
+            cluster['_id'] = str(cluster['_id'])
+        ts = cluster.get('last_updated')
+        if isinstance(ts, datetime):
+            cluster['last_updated'] = ts.isoformat()
+    return jsonify({"clusters": clusters})
+
+
+@app.route('/feedback', methods=['POST'])
+def feedback_endpoint():
+    data = request.get_json() or {}
+    if 'rating' not in data:
+        return jsonify({"error": "rating is required"}), 400
+    feedback_id = feedback_loop.record_feedback(data)
+    return jsonify({"feedback_id": feedback_id}), 201
+
+
+@app.route('/metrics', methods=['GET'])
+def metrics_endpoint():
+    metrics = feedback_loop.latest_metrics()
+    if not metrics:
+        metrics = feedback_loop.compute_metrics()
+    if metrics.get('_id'):
+        metrics['_id'] = str(metrics['_id'])
+    if metrics.get('timestamp') and isinstance(metrics['timestamp'], datetime):
+        metrics['timestamp'] = metrics['timestamp'].isoformat()
+    return jsonify(metrics)
 
 @app.route('/chat', methods=['POST'])
 def chat_handler():
@@ -703,15 +959,39 @@ def chat_handler():
                         upsert=True
                     )
                     return jsonify({"message": response_content, "fsm_state": fsm.state, "flow": flow_type}), 200
-                else:
-                    response_content = generate_support_reply(model_settings, history, rag_knowledge, user_profile, persona_name)
-                    save_message_to_history(user_id, "assistant", response_content)
-                    db[USER_PROFILES_COL].update_one(
-                        {"user_id": user_id},
-                        {"$set": {"fsm_state": fsm.state, "last_support_attempt": datetime.now()}},
-                        upsert=True
+                router_payload = None
+                if ticket_router and user_message:
+                    router_payload = ticket_router.route_ticket(
+                        persona_name,
+                        user_message,
+                        ticket_id=f"{user_id}-{int(time.time())}",
+                        metadata={"needs_supervisor": needs_supervisor, "lead_status": lead_status},
                     )
-                    return jsonify({"message": response_content, "fsm_state": fsm.state, "flow": flow_type}), 200
+                    if router_payload.get("decision") == "auto_resolved" and router_payload.get("resolution_proposal"):
+                        fsm.support_resolved()
+                        response_content = (
+                            "Here’s the fix that usually works for this scenario:\n" + router_payload["resolution_proposal"]
+                        )
+                        save_message_to_history(user_id, "assistant", response_content)
+                        db[USER_PROFILES_COL].update_one(
+                            {"user_id": user_id},
+                            {"$set": {"fsm_state": fsm.state, "last_support_attempt": datetime.now()}},
+                            upsert=True
+                        )
+                        return jsonify({
+                            "message": response_content,
+                            "fsm_state": fsm.state,
+                            "flow": flow_type,
+                            "router": router_payload,
+                        }), 200
+                response_content = generate_support_reply(model_settings, history, rag_knowledge, user_profile, persona_name)
+                save_message_to_history(user_id, "assistant", response_content)
+                db[USER_PROFILES_COL].update_one(
+                    {"user_id": user_id},
+                    {"$set": {"fsm_state": fsm.state, "last_support_attempt": datetime.now()}},
+                    upsert=True
+                )
+                return jsonify({"message": response_content, "fsm_state": fsm.state, "flow": flow_type, "router": router_payload}), 200
 
             # Inbound product conversation
             fsm.progress()
@@ -786,6 +1066,5 @@ def chat_handler():
 
 if __name__ == "__main__":
     if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-        sync_thread = threading.Thread(target=sync_drive_personas_task, daemon=True)
-        sync_thread.start()
+        start_background_threads()
     app.run(host="0.0.0.0", port=8001, debug=True)

@@ -7,3 +7,6 @@ pymongo
 python-dotenv
 numpy
 transitions
+requests
+scikit-learn
+python-dateutil

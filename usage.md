@@ -1,5 +1,5 @@
 
-````markdown
+
 # Usage Guide — Obvix Lake Conversational Orchestrator
 
 This service orchestrates customer sales & support conversations with a single endpoint and three intelligent flows:
@@ -49,6 +49,18 @@ Notes:
 * Always set `persona_name` to the exact Drive folder (e.g., `ol_residential_broadband`). There is no default persona.
 * You **never** pass customer attributes via API. Flow selection uses what’s already stored for `user_id` in Mongo.
 * All messages are appended to chat history and drive profile enrichment automatically.
+
+### Additional Operational APIs
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/health` | GET | Full health probe covering the Flask app plus MongoDB, Google Drive, OpenAI, and GLPI. |
+| `/tickets/route` | POST | Standalone ticket router + semantic lookup. Pass `{ "persona": "ol_support", "description": "..." }` to receive the classifier decision, urgency, and best matching knowledge snippets. |
+| `/analytics/trends` | GET | Returns the most recent clustering + trend analysis computed from GLPI resolutions (emerging issues, top entities, cluster sizes). |
+| `/feedback` | POST | Agent/customer feedback ingestion (`rating`, `comment`, optional `ticket_id`). Feeds the feedback loop + metrics. |
+| `/metrics` | GET | Latest KPI snapshot (auto-resolution rate, CSAT, knowledge growth ratio, avg resolution hours). |
+
+All operational endpoints return JSON and reuse the same auth context as `/chat`.
 
 ---
 
@@ -309,7 +321,41 @@ User: “300 Mbps in Bengaluru? Need strong uploads.”
 
 ---
 
-**That’s it.** Send messages to `/chat` with a stable `user_id`, and the system will route the flow, keep memory up to date, and do the right thing for sales or support—always grounded in the selected persona and knowledge.
+## 15) GLPI Ticket Sync & Resolution Extraction
+
+Set the following env vars to activate the closed-loop GLPI integration:
 
 ```
+GLPI_HOST=https://glpi.example.com
+GLPI_APP_TOKEN=<application token>
+GLPI_API_TOKEN=<user token>
+DEFAULT_SUPPORT_PERSONA=ol_technical_and_diagnostics   # optional override
+GLPI_SYNC_INTERVAL_SECONDS=1800                        # optional
 ```
+
+A background worker authenticates with GLPI, fetches recently closed/solved tickets, stores raw payloads under `glpi_tickets`, and runs the resolution extractor. Each structured resolution lands in `glpi_resolutions` with embeddings, root cause, entities, and confidence. The `/health` endpoint includes GLPI status, so dashboards can alarm if sync fails.
+
+## 16) Knowledge Pipeline & Auto-KB Publishing
+
+Every processed resolution is enqueued in `knowledge_pipeline_queue`. The pipeline:
+
+1. Drafts an article (title, summary, steps, tags) via GPT.
+2. Simulates lead/SMe approvals (timestamps recorded) and deduplicates against existing KB embeddings.
+3. Publishes approved content into:
+   * `knowledge_articles` (audit record, article embedding).
+   * Persona MongoDB collections (`persona_<slug>`) as `doc_type="knowledge"` chunks tagged with `source="glpi_pipeline"`.
+
+This makes new fixes searchable immediately alongside Google Drive docs and powers `/tickets/route` auto-resolutions. Configure `KNOWLEDGE_PIPELINE_INTERVAL_SECONDS` to tune how often drafts are processed.
+
+## 17) Trend Analytics & Feedback Loop
+
+* **Clustering:** Resolutions from the last 7 days are embedded and clustered (MiniBatchKMeans). `/analytics/trends` returns cluster ids, labels, sizes, top entities, and trend direction (`emerging/growing/stable/declining`). Refresh cadence is set by `ANALYTICS_REFRESH_INTERVAL_SECONDS`.
+* **Feedback ingestion:** POST `/feedback` with `rating` (1–5), `comment`, optional `source` (`customer|agent`) and `ticket_id`. Everything is stored in `feedback_events`.
+* **Metrics:** A periodic worker aggregates auto-resolution rate, CSAT, knowledge growth ratio, and average GLPI resolution hours into `system_metrics`. `/metrics` always exposes the latest snapshot.
+
+## 18) Operational Health Checks
+
+`GET /health` fans out to MongoDB, Google Drive, OpenAI, and GLPI. Each entry surfaces `status` (`ok|error|disabled`) plus `error` text when needed. Poll this endpoint from uptime monitors to watch every dependency—including the new GLPI bridge.
+
+---
+**That’s it.** Between `/chat`, the GLPI-driven knowledge lake, `/tickets/route`, and the health/analytics/feedback APIs, Obvix Lake now runs the full closed-loop described in the v2 spec.
