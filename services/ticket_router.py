@@ -40,18 +40,20 @@ class TicketRouter:
     def classify(self, ticket_text: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         metadata = metadata or {}
         system = (
-            "Classify the support ticket. Return JSON with keys: issue_category, urgency (low|medium|high|urgent), "
-            "sentiment (angry|neutral|positive), requires_human (bool), needs_supervisor (bool), "
-            "auto_resolve_candidate (bool), confidence (0-1 float)."
+            "You are a triage controller. Label the ticket with multiple dimensions. "
+            "Return STRICT JSON with keys: issue_category, issue_type, urgency (low|medium|high|urgent), "
+            "impact_scope (single_user|multi_user|systemwide), sentiment (angry|neutral|positive), "
+            "requires_human (bool), needs_supervisor (bool), confidence (0-1 float)."
         )
         user_payload = f"Ticket text:\n{ticket_text}\n\nKnown metadata: {metadata}"
         fallback = {
             "issue_category": "general",
+            "issue_type": "diagnostic",
             "urgency": "medium",
+            "impact_scope": "single_user",
             "sentiment": "neutral",
             "requires_human": True,
             "needs_supervisor": False,
-            "auto_resolve_candidate": False,
             "confidence": 0.45,
         }
         return self._llm_json_fn(system, user_payload, fallback)

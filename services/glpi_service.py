@@ -160,6 +160,27 @@ class GLPIClient:
         return tickets
 
 
+    def create_ticket(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        body = payload if "input" in payload else {"input": payload}
+        try:
+            self.init_session()
+            resp = self.session.post(
+                self._url("Ticket"),
+                headers=self._session_headers(),
+                json=body,
+                timeout=self.request_timeout,
+                verify=self.verify_ssl,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                raise RuntimeError("GLPI returned empty response when creating ticket")
+            return data
+        except Exception as exc:
+            logger.error("Failed to create GLPI ticket: %s", exc)
+            raise
+
+
 class ResolutionExtractor:
     """Turns free-form GLPI resolution notes into structured knowledge objects."""
 
