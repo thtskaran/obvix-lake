@@ -46,7 +46,6 @@ PERSONA_COLLECTION_PREFIX = "persona_"
 EMBEDDING_MODEL = "text-embedding-3-large"
 CHAT_MODEL = "gpt-4o"
 LLM_TEMP_LOW = 0.1
-DEFAULT_AGENT_NAME = "Ari"
 
 # RAG & Flow Config
 MAX_HISTORY_MESSAGES_TO_RETRIEVE = 10
@@ -363,6 +362,16 @@ def extract_and_upsert_profile_fields(user_id: str, message: str, history: Optio
 # ==============================================================================
 # TEXT GENERATORS
 # ==============================================================================
+def resolve_model_name(model_settings: Dict[str, Any], persona_name: str) -> str:
+    name = (model_settings or {}).get("model_name")
+    if name:
+        return name
+    slug = persona_name or ""
+    if slug.startswith("ol_"):
+        slug = slug[3:]
+    slug = slug.replace("_", " ").strip()
+    return slug.title() if slug else "Agent"
+
 def build_user_memory_snippet(user_profile: Dict[str, Any]) -> str:
     keys_in_priority = [
         "name", "city", "address_area", "gender", "income_range", "salary", "budget",
@@ -378,9 +387,10 @@ def build_user_memory_snippet(user_profile: Dict[str, Any]) -> str:
     return "; ".join(items) if items else "No stored user facts."
 
 def generate_upsell_suggestion(model_settings: Dict[str, Any], user_profile: Dict[str, Any],
-                               history: List[Dict[str, str]], rag_knowledge: str, common_phrases: str) -> str:
+                               history: List[Dict[str, str]], rag_knowledge: str, common_phrases: str, persona_name: str) -> str:
+    agent_name = resolve_model_name(model_settings, persona_name)
     system = (
-        f'You are "{model_settings.get("model_name", DEFAULT_AGENT_NAME)}", {model_settings.get("model_identity", "a senior sales specialist")}.'
+        f'You are "{agent_name}", {model_settings.get("model_identity", "a senior sales specialist")}.'
         "The user is an EXISTING customer. Do NOT ask for profile data we already have. "
         "Provide one clear upgrade recommendation (e.g., higher tier or bundle), tie to their needs and budget. "
         "Match the user's tone preference if stored; else align to observed tone if provided. "
@@ -407,9 +417,10 @@ def generate_upsell_suggestion(model_settings: Dict[str, Any], user_profile: Dic
     return resp.choices[0].message.content.strip()
 
 def generate_support_reply(model_settings: Dict[str, Any], history: List[Dict[str, str]], rag_knowledge: str,
-                           user_profile: Dict[str, Any]) -> str:
+                           user_profile: Dict[str, Any], persona_name: str) -> str:
+    agent_name = resolve_model_name(model_settings, persona_name)
     system = (
-        f'You are "{model_settings.get("model_name", DEFAULT_AGENT_NAME)}" from the support team for this persona.\n'
+        f'You are "{agent_name}" from the support team for this persona.\n'
         "Provide a clear, step-by-step resolution or next steps. Max 4 steps, under 120 words. "
         "Never request OTPs or sensitive data. Match the stored tone preference if present; else align to observed tone. "
         "Never say you are an AI."
@@ -427,13 +438,14 @@ def generate_support_reply(model_settings: Dict[str, Any], history: List[Dict[st
     )
     return resp.choices[0].message.content.strip()
 
-def _generate_dedicated_cta(model_settings, history, user_profile: Dict[str, Any]):
+def _generate_dedicated_cta(model_settings, history, user_profile: Dict[str, Any], persona_name: str):
     logging.info("Generating dedicated CTA...")
+    agent_name = resolve_model_name(model_settings, persona_name)
     memory = build_user_memory_snippet(user_profile)
     tone_pref = user_profile.get("tone_preference", "")
     tone_obs = (user_profile.get("tone_observed") or "neutral")
     cta_system_prompt = f"""
-Your name is {model_settings.get('model_name', DEFAULT_AGENT_NAME)}, a sales specialist representing this persona.
+Your name is {agent_name}, a sales specialist representing this persona.
 Output ONLY a strong Call-To-Action to schedule a short consultation call.
 Match tone_preference if present; else align to observed tone. Avoid placeholders.
 User memory: {memory}
@@ -446,6 +458,7 @@ Tone preference: {tone_pref} | Observed tone: {tone_obs}
         model=CHAT_MODEL, messages=messages, temperature=LLM_TEMP_LOW, max_tokens=150
     )
     return ai_response.choices[0].message.content.strip()
+
 
 def analyze_cta_response(user_response: str) -> str:
     logging.info(f"Analyzing user response to CTA: '{user_response}'")
@@ -463,7 +476,7 @@ def analyze_cta_response(user_response: str) -> str:
 # ==============================================================================
 # MESSAGE CONSTRUCTION
 # ==============================================================================
-def construct_llm_messages(model_settings, history, rag_knowledge, common_phrases, fsm_state, user_profile: Dict[str, Any]):
+def construct_llm_messages(model_settings, history, rag_knowledge, common_phrases, fsm_state, user_profile: Dict[str, Any], persona_name: str):
     phase_instructions = {
         "Phase1_RapportBuilding": "Build rapport. Introduce yourself (no placeholders). Ask 1–2 open questions to learn needs/location/budget.",
         "Phase2_NeedsDiscovery": "Probe concisely for pain points, speed, budget, city, timeline. Avoid asking for info we already know.",
@@ -475,9 +488,10 @@ def construct_llm_messages(model_settings, history, rag_knowledge, common_phrase
     memory = build_user_memory_snippet(user_profile)
     tone_pref = user_profile.get("tone_preference", "")
     tone_obs = (user_profile.get("tone_observed") or "neutral")
+    agent_name = resolve_model_name(model_settings, persona_name)
 
     system_prompt = f"""
-You are "{model_settings.get('model_name', DEFAULT_AGENT_NAME)}", a {model_settings.get('model_age', '28')}-year-old {model_settings.get('model_identity', 'senior sales specialist')}.
+You are "{agent_name}", a {model_settings.get('model_age', '28')}-year-old {model_settings.get('model_identity', 'senior sales specialist')}.
 Persona: professional, confident, expert on the offerings this persona covers.
 
 CURRENT STATE: {fsm_state}
@@ -498,6 +512,7 @@ KNOWLEDGE:
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     return messages
+
 
 # ==============================================================================
 # BUYING INTENT PROFILE UPDATE
@@ -659,7 +674,7 @@ def chat_handler():
         # Flow routing
         if flow_type == "outbound_existing":
             fsm.set_flow_outbound_upsell()
-            upsell = generate_upsell_suggestion(model_settings, user_profile, history, rag_knowledge, common_phrases)
+            upsell = generate_upsell_suggestion(model_settings, user_profile, history, rag_knowledge, common_phrases, persona_name)
             response_content = upsell
             save_message_to_history(user_id, "assistant", response_content)
             db[USER_PROFILES_COL].update_one({"user_id": user_id}, {"$set": {"fsm_state": fsm.state}}, upsert=True)
@@ -689,7 +704,7 @@ def chat_handler():
                     )
                     return jsonify({"message": response_content, "fsm_state": fsm.state, "flow": flow_type}), 200
                 else:
-                    response_content = generate_support_reply(model_settings, history, rag_knowledge, user_profile)
+                    response_content = generate_support_reply(model_settings, history, rag_knowledge, user_profile, persona_name)
                     save_message_to_history(user_id, "assistant", response_content)
                     db[USER_PROFILES_COL].update_one(
                         {"user_id": user_id},
@@ -700,7 +715,7 @@ def chat_handler():
 
             # Inbound product conversation
             fsm.progress()
-            llm_messages = construct_llm_messages(model_settings, history, rag_knowledge, common_phrases, fsm.state, user_profile)
+            llm_messages = construct_llm_messages(model_settings, history, rag_knowledge, common_phrases, fsm.state, user_profile, persona_name)
             if user_message:
                 llm_messages.append({"role": "user", "content": user_message})
             ai_response = openai_client.chat.completions.create(
@@ -713,7 +728,7 @@ def chat_handler():
 
             if intent_metrics["confidence"] >= BUYING_CONFIDENCE_CTA_THRESHOLD:
                 fsm.go_to_cta()
-                cta = _generate_dedicated_cta(model_settings, history + [{"role": "assistant", "content": assistant_msg}], user_profile)
+                cta = _generate_dedicated_cta(model_settings, history + [{"role": "assistant", "content": assistant_msg}], user_profile, persona_name)
                 response_content = assistant_msg + "\n\n" + cta
             else:
                 response_content = assistant_msg
@@ -731,7 +746,7 @@ def chat_handler():
         # Outbound lead (non-customer)
         if flow_type == "outbound_lead":
             fsm.progress()
-            llm_messages = construct_llm_messages(model_settings, history, rag_knowledge, common_phrases, fsm.state, user_profile)
+            llm_messages = construct_llm_messages(model_settings, history, rag_knowledge, common_phrases, fsm.state, user_profile, persona_name)
             if user_message:
                 llm_messages.append({"role": "user", "content": user_message})
             ai_response = openai_client.chat.completions.create(
@@ -744,7 +759,7 @@ def chat_handler():
 
             if intent_metrics["confidence"] >= BUYING_CONFIDENCE_CTA_THRESHOLD:
                 fsm.go_to_cta()
-                cta = _generate_dedicated_cta(model_settings, history + [{"role": "assistant", "content": assistant_msg}], user_profile)
+                cta = _generate_dedicated_cta(model_settings, history + [{"role": "assistant", "content": assistant_msg}], user_profile, persona_name)
                 response_content = assistant_msg + "\n\n" + cta
             else:
                 response_content = assistant_msg
