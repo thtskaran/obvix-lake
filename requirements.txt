@@ -1,0 +1,9 @@
+Flask
+Flask-Cors
+google-auth
+google-api-python-client
+openai
+pymongo
+python-dotenv
+numpy
+transitions

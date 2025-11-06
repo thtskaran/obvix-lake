@@ -1,0 +1,7 @@
+client.json
+/myenv
+*.pyc
+__pycache__/
+.DS_Store
+.vscode/
+.env
