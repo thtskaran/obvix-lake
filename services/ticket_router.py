@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from services.rag_utils import extract_query_terms, stream_article_chunks, stream_manual_chunks
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,29 +63,92 @@ class TicketRouter:
     def _persona_collection(self, persona: str):
         return self.db[f"{self.persona_prefix}{persona}"]
 
+    def _tag_candidates(self, persona: str, query_terms: List[str], limit: int) -> List[Dict[str, Any]]:
+        if not query_terms:
+            return []
+        collection = self._persona_collection(persona)
+        results: List[Dict[str, Any]] = []
+        manual_cursor = (
+            collection.find({"doc_type": "knowledge", "tags": {"$in": query_terms}, "embedding": {"$exists": True}})
+            .sort([("approved_at", -1), ("created_at", -1)])
+            .limit(limit)
+        )
+        for chunk in stream_manual_chunks(manual_cursor, require_embedding=True):
+            chunk["match_reason"] = "tags"
+            results.append(chunk)
+            if len(results) >= limit:
+                return results
+        article_cursor = (
+            collection.find({"doc_type": "knowledge_article", "tags": {"$in": query_terms}, "chunks.embedding": {"$exists": True}})
+            .sort([("published_at", -1)])
+            .limit(limit)
+        )
+        for chunk in stream_article_chunks(article_cursor, require_embedding=True):
+            chunk["match_reason"] = "tags"
+            results.append(chunk)
+            if len(results) >= limit:
+                break
+        return results
+
+    def _vector_candidates(self, persona: str) -> List[Dict[str, Any]]:
+        collection = self._persona_collection(persona)
+        results: List[Dict[str, Any]] = []
+        manual_cursor = (
+            collection.find({"doc_type": "knowledge", "embedding": {"$exists": True}})
+            .limit(self.max_docs_to_score)
+        )
+        for chunk in stream_manual_chunks(manual_cursor, require_embedding=True):
+            chunk["match_reason"] = "vector"
+            results.append(chunk)
+            if len(results) >= self.max_docs_to_score:
+                return results
+        article_cursor = (
+            collection.find({"doc_type": "knowledge_article", "chunks.embedding": {"$exists": True}})
+            .limit(self.max_docs_to_score)
+        )
+        for chunk in stream_article_chunks(article_cursor, require_embedding=True):
+            chunk["match_reason"] = "vector"
+            results.append(chunk)
+            if len(results) >= self.max_docs_to_score:
+                break
+        return results
+
+    def _score_chunks(
+        self,
+        chunks: List[Dict[str, Any]],
+        query_embedding: List[float],
+        top_k: int,
+    ) -> List[Dict[str, Any]]:
+        scored: List[Dict[str, Any]] = []
+        for chunk in chunks:
+            embedding = chunk.get("embedding")
+            if not embedding:
+                continue
+            scored.append(
+                {
+                    "content": chunk.get("content"),
+                    "similarity": _cosine_similarity(query_embedding, embedding),
+                    "match_reason": chunk.get("match_reason"),
+                    "article_id": chunk.get("article_id") or chunk.get("doc_id"),
+                    "source_ticket_id": chunk.get("source_ticket_id"),
+                    "title": chunk.get("title"),
+                }
+            )
+        scored.sort(key=lambda item: item["similarity"], reverse=True)
+        return scored[:top_k]
+
     def _top_knowledge_matches(
         self,
         persona: str,
         query_embedding: List[float],
+        query_terms: List[str],
         top_k: int = 3,
     ) -> List[Dict[str, Any]]:
-        cursor = self._persona_collection(persona).find(
-            {"doc_type": "knowledge", "embedding": {"$exists": True}}
-        ).limit(self.max_docs_to_score)
-        scored: List[Dict[str, Any]] = []
-        for doc in cursor:
-            embedding = doc.get("embedding")
-            if not embedding:
-                continue
-            similarity = _cosine_similarity(query_embedding, embedding)
-            scored.append({
-                "file_id": doc.get("file_id"),
-                "chunk_index": doc.get("chunk_index"),
-                "content": doc.get("content"),
-                "similarity": similarity,
-            })
-        scored.sort(key=lambda item: item["similarity"], reverse=True)
-        return scored[:top_k]
+        tag_chunks = self._tag_candidates(persona, query_terms, max(top_k * 2, top_k))
+        if tag_chunks:
+            return self._score_chunks(tag_chunks, query_embedding, top_k)
+        vector_chunks = self._vector_candidates(persona)
+        return self._score_chunks(vector_chunks, query_embedding, top_k)
 
     # ------------------------------------------------------------------
     def route_ticket(
@@ -96,7 +161,8 @@ class TicketRouter:
         persona_slug = persona.lower().replace(" ", "_")
         classification = self.classify(ticket_text, metadata) or {}
         embedding = self._embedding_fn([ticket_text])[0]
-        matches = self._top_knowledge_matches(persona_slug, embedding)
+        query_terms = extract_query_terms(ticket_text)
+        matches = self._top_knowledge_matches(persona_slug, embedding, query_terms)
         top_score = matches[0]["similarity"] if matches else 0.0
         has_matches = bool(matches)
         auto_eligible = has_matches and top_score >= self.auto_resolution_threshold

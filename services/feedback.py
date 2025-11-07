@@ -49,15 +49,25 @@ class FeedbackLoop:
         if customer_feedback:
             ratings = [float(doc.get("rating", 0)) for doc in customer_feedback if doc.get("rating") is not None]
             avg_csat = sum(ratings) / len(ratings) if ratings else 0.0
-        kb_coll = self.db["knowledge_articles"]
-        auto_articles = kb_coll.count_documents({"published_at": {"$gte": thirty_days_ago}, "source_ticket_id": {"$exists": True}})
         persona_kb_collections = [name for name in self.db.list_collection_names() if name.startswith("persona_")]
-        manual_articles = 1
-        if persona_kb_collections:
-            manual_articles = max(
-                1,
-                sum(self.db[name].count_documents({"source": {"$exists": False}}) for name in persona_kb_collections),
+        auto_articles = 0
+        manual_articles = 0
+        for name in persona_kb_collections:
+            coll = self.db[name]
+            auto_articles += coll.count_documents(
+                {
+                    "doc_type": "knowledge_article",
+                    "source": "glpi_pipeline",
+                    "published_at": {"$gte": thirty_days_ago},
+                }
             )
+            manual_articles += coll.count_documents(
+                {
+                    "doc_type": "knowledge",
+                    "source": {"$exists": False},
+                }
+            )
+        manual_articles = max(1, manual_articles)
         knowledge_ratio = (auto_articles / manual_articles) if auto_articles else 0.0
         metrics = {
             "timestamp": now,

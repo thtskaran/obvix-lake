@@ -213,11 +213,20 @@ class ResolutionExtractor:
         content = ticket.get("content") or ticket.get("content_text") or ""
         solution = ticket.get("solution") or ticket.get("solutioncontent") or ""
         notes_blocks: List[str] = []
+        sanitized_followups: List[Dict[str, Any]] = []
         for followup in ticket.get("followups", []) or []:
-            if isinstance(followup, dict):
-                txt = followup.get("content") or followup.get("description")
-                if txt:
-                    notes_blocks.append(txt)
+            if not isinstance(followup, dict):
+                continue
+            txt = followup.get("content") or followup.get("description")
+            if txt:
+                notes_blocks.append(txt)
+                sanitized_followups.append(
+                    {
+                        "date": followup.get("date"),
+                        "author": followup.get("users_id") or followup.get("users_id_recipient"),
+                        "content": txt,
+                    }
+                )
         joined_notes = "\n".join(notes_blocks)
         if not (content or solution or joined_notes):
             return None
@@ -268,6 +277,7 @@ class ResolutionExtractor:
                 "closedate": ticket.get("closedate"),
                 "content": content,
                 "solution": solution,
+                "followups": sanitized_followups,
             },
         }
 

@@ -26,6 +26,7 @@ from services.ticket_router import TicketRouter
 from services.knowledge_pipeline import KnowledgePipeline
 from services.analytics import TrendAnalyzer
 from services.feedback import FeedbackLoop
+from services.rag_utils import extract_query_terms, stream_article_chunks, stream_manual_chunks
 
 # FSM Import
 from fsm import initialize_fsm_for_user
@@ -62,7 +63,6 @@ GLPI_RAW_TICKETS_COL = "glpi_tickets"
 GLPI_RESOLUTIONS_COL = "glpi_resolutions"
 GLPI_SYNC_STATE_COL = "glpi_sync_state"
 KNOWLEDGE_QUEUE_COL = "knowledge_pipeline_queue"
-KNOWLEDGE_ARTICLES_COL = "knowledge_articles"
 ANALYTICS_CLUSTERS_COL = "analytics_clusters"
 TICKET_ROUTING_AUDIT_COL = "ticket_routing_audit"
 FEEDBACK_EVENTS_COL = "feedback_events"
@@ -84,6 +84,7 @@ PERSONA_FOLDER_LOCK = threading.Lock()
 
 # RAG & Flow Config
 MAX_HISTORY_MESSAGES_TO_RETRIEVE = 10
+MAX_RAG_DOCS_TO_SCORE = 400
 
 if not all([WATCH_FOLDER_ID, MONGO_URI, OPENAI_API_KEY]):
     raise SystemExit("❌ FATAL: Missing essential environment variables.")
@@ -379,6 +380,56 @@ def get_relevant_history(user_id: str, k: int) -> list:
 # ==============================================================================
 # PERSONA / RAG
 # ==============================================================================
+
+
+def _collect_tagged_chunks(persona_collection, query_terms: List[str], limit: int) -> List[Dict[str, Any]]:
+    if not query_terms:
+        return []
+    results: List[Dict[str, Any]] = []
+    manual_cursor = (
+        persona_collection.find({"doc_type": "knowledge", "tags": {"$in": query_terms}})
+        .sort([("approved_at", DESCENDING), ("created_at", DESCENDING)])
+        .limit(limit)
+    )
+    for chunk in stream_manual_chunks(manual_cursor):
+        results.append(chunk)
+        if len(results) >= limit:
+            return results
+    article_cursor = (
+        persona_collection.find({"doc_type": "knowledge_article", "tags": {"$in": query_terms}})
+        .sort([("published_at", DESCENDING)])
+        .limit(limit)
+    )
+    for chunk in stream_article_chunks(article_cursor):
+        results.append(chunk)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _collect_vector_candidates(persona_collection, limit: int) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    manual_cursor = (
+        persona_collection.find({"doc_type": "knowledge", "embedding": {"$exists": True}})
+        .limit(limit)
+    )
+    for chunk in stream_manual_chunks(manual_cursor, require_embedding=True):
+        if chunk.get("embedding"):
+            candidates.append(chunk)
+        if len(candidates) >= limit:
+            return candidates
+    article_cursor = (
+        persona_collection.find({"doc_type": "knowledge_article", "chunks.embedding": {"$exists": True}})
+        .limit(limit)
+    )
+    for chunk in stream_article_chunks(article_cursor, require_embedding=True):
+        if chunk.get("embedding"):
+            candidates.append(chunk)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def get_persona_context(persona_name: str, query: str, k: int = 4) -> tuple:
     collection_name = f"{PERSONA_COLLECTION_PREFIX}{persona_name}"
     persona_collection = db[collection_name]
@@ -388,16 +439,30 @@ def get_persona_context(persona_name: str, query: str, k: int = 4) -> tuple:
     common_phrases = phrases_doc["content"] if phrases_doc else ""
     logging.info(f"Loaded persona {persona_name} with settings: {model_settings} and common phrases.")
 
-    query_embedding = openai_client.embeddings.create(input=[query], model=EMBEDDING_MODEL).data[0].embedding
-
-    all_knowledge = list(persona_collection.find({"doc_type": "knowledge"}))
-    if all_knowledge:
-        for doc in all_knowledge:
-            doc["similarity"] = float(np.dot(query_embedding, doc["embedding"]))
-        all_knowledge.sort(key=lambda x: x["similarity"], reverse=True)
-        rag_knowledge = "\n---\n".join([doc["content"] for doc in all_knowledge[:k]])
+    rag_docs: List[Dict[str, Any]] = []
+    query_terms = extract_query_terms(query)
+    tagged = _collect_tagged_chunks(persona_collection, query_terms, k)
+    if tagged:
+        rag_docs = tagged
     else:
-        rag_knowledge = "No specific background knowledge provided."
+        query_embedding = openai_client.embeddings.create(input=[query], model=EMBEDDING_MODEL).data[0].embedding
+        candidates = _collect_vector_candidates(persona_collection, MAX_RAG_DOCS_TO_SCORE)
+        scored: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            embedding = candidate.get("embedding")
+            if not embedding:
+                continue
+            scored.append({
+                **candidate,
+                "similarity": float(np.dot(query_embedding, embedding)),
+            })
+        scored.sort(key=lambda x: x["similarity"], reverse=True)
+        rag_docs = scored[:k]
+    rag_knowledge = (
+        "\n---\n".join([doc.get("content", "") for doc in rag_docs if doc.get("content")])
+        if rag_docs
+        else "No specific background knowledge provided."
+    )
 
     return model_settings, common_phrases, rag_knowledge
 
@@ -435,7 +500,6 @@ knowledge_pipeline = KnowledgePipeline(
     _llm_json_call,
     build_embeddings,
     queue_collection=KNOWLEDGE_QUEUE_COL,
-    articles_collection=KNOWLEDGE_ARTICLES_COL,
     auto_approve=KNOWLEDGE_AUTO_APPROVE,
 )
 

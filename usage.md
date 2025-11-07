@@ -243,11 +243,11 @@ Additionally, whenever the router flags `needs_supervisor`/`requires_human`, `/c
 Every processed resolution is enqueued in `knowledge_pipeline_queue`. The pipeline:
 
 1. Drafts an article (title, summary, steps, tags) via GPT.
-2. Stores the final chunks directly inside the persona’s MongoDB collection (`doc_type="knowledge"`) with two extra fields: `auto_generated=true` and `approved` (`auto` vs `manual`).
+2. Persists the draft plus transcript context on `knowledge_pipeline_queue` for approval (or immediate auto-approval when enabled).
 3. Applies approvals automatically when `KNOWLEDGE_AUTO_APPROVE=true`; set it to `false` to hold drafts in `awaiting_approval` until a reviewer signs off.
-4. Publishes approved content into:
-   * `knowledge_articles` (audit record, article embedding).
-   * Persona MongoDB collections (`persona_<slug>`) as `doc_type="knowledge"` chunks tagged with `source="glpi_pipeline"`.
+4. Publishes approved content directly into the persona MongoDB collection (`persona_<slug>`) as a single `doc_type="knowledge_article"` document that contains:
+   * Full FAQ-style metadata (summary, FAQ pairs, preventive guidance, transcript excerpts, embeddings).
+   * A `chunks` array that stores the chunked passages + their embeddings so RAG can perform tag-first lookups before falling back to cosine similarity—all without generating extra per-chunk documents.
 
 Manual reviews happen over the API: `GET /knowledge/queue?status=awaiting_approval` lists drafts, and `POST /knowledge/queue/<id>/approve` (body `{ "reviewer": "alice" }`) publishes the article, marks the knowledge chunks as `approved=manual`, and timestamps the approval.
 
