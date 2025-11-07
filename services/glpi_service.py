@@ -91,7 +91,37 @@ class GLPIClient:
             return {"status": "error", "error": str(exc)}
 
     # ------------------------------------------------------------------
-    def get_ticket(self, ticket_id: int) -> Optional[Dict[str, Any]]:
+    def _extract_list(self, data: Any) -> List[Dict[str, Any]]:
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            payload = data.get("data")
+            if isinstance(payload, list):
+                return payload
+        return []
+
+    def _get_ticket_subresource(self, ticket_id: int, resource: str) -> List[Dict[str, Any]]:
+        try:
+            self.init_session()
+            resp = self.session.get(
+                self._url(f"Ticket/{ticket_id}/{resource}"),
+                headers=self._session_headers(),
+                timeout=self.request_timeout,
+                verify=self.verify_ssl,
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            data = resp.json() if resp.content else []
+            return self._extract_list(data)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Failed to fetch GLPI ticket %s %s: %s", ticket_id, resource, exc)
+            return []
+
+    def get_ticket_followups(self, ticket_id: int) -> List[Dict[str, Any]]:
+        return self._get_ticket_subresource(ticket_id, "ITILFollowup")
+
+    def get_ticket(self, ticket_id: int, include_details: bool = False) -> Optional[Dict[str, Any]]:
         try:
             self.init_session()
             resp = self.session.get(
@@ -103,7 +133,10 @@ class GLPIClient:
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
-            return resp.json()
+            ticket = resp.json()
+            if include_details and ticket is not None:
+                ticket["followups"] = self.get_ticket_followups(ticket_id)
+            return ticket
         except Exception as exc:
             logger.error("Failed to fetch GLPI ticket %s: %s", ticket_id, exc)
             return None
@@ -161,7 +194,7 @@ class GLPIClient:
             ticket_id = row.get("2") or row.get("id") or row.get("Ticket.id")
             if not ticket_id:
                 continue
-            ticket = self.get_ticket(int(ticket_id))
+            ticket = self.get_ticket(int(ticket_id), include_details=True)
             if not ticket:
                 continue
             closed_value = ticket.get("closedate") or ticket.get("solvedate") or ticket.get("date")
@@ -227,6 +260,16 @@ class ResolutionExtractor:
                         "content": txt,
                     }
                 )
+        if not solution:
+            solution_chunks: List[str] = []
+            for entry in ticket.get("solutions", []) or []:
+                if not isinstance(entry, dict):
+                    continue
+                chunk = entry.get("content") or entry.get("solution") or entry.get("description")
+                if chunk:
+                    solution_chunks.append(chunk.strip())
+            if solution_chunks:
+                solution = "\n\n".join(solution_chunks)
         joined_notes = "\n".join(notes_blocks)
         if not (content or solution or joined_notes):
             return None
@@ -278,6 +321,7 @@ class ResolutionExtractor:
                 "content": content,
                 "solution": solution,
                 "followups": sanitized_followups,
+                "solutions": ticket.get("solutions") or [],
             },
         }
 
@@ -323,7 +367,7 @@ class GLPISyncService:
         for ticket_id in self._escalated_ticket_ids():
             if self.db[self.resolution_collection].find_one({"ticket_id": ticket_id}):
                 continue
-            ticket = self.client.get_ticket(ticket_id)
+            ticket = self.client.get_ticket(ticket_id, include_details=True)
             if not ticket:
                 continue
             closed_value = ticket.get("closedate") or ticket.get("solvedate")
@@ -397,7 +441,7 @@ class GLPISyncService:
             )
             created += 1
             processed += 1
-            if self.resolution_handler:
+            if persona_override and self.resolution_handler:
                 try:
                     self.resolution_handler(resolution, persona=persona_override)
                 except Exception as exc:  # pragma: no cover - defensive

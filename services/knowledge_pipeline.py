@@ -39,10 +39,6 @@ _STOPWORDS = {
     "req",
 }
 
-_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_PHONE_PATTERN = re.compile(r"\+?\d[\d\-() ]{6,}\d")
-
-
 def _cosine(a: List[float], b: List[float]) -> float:
     va = np.array(a)
     vb = np.array(b)
@@ -134,12 +130,6 @@ class KnowledgePipeline:
         if not cleaned:
             cleaned = self._derive_issue_tags(resolution)
         return cleaned[:3]
-
-    def _contains_pii(self, text: Optional[str]) -> bool:
-        if not text:
-            return False
-        sample = text.strip()
-        return bool(_EMAIL_PATTERN.search(sample) or _PHONE_PATTERN.search(sample))
 
     def _compose_transcript(self, resolution: Dict[str, Any], max_chars: int = 6000) -> str:
         raw_ticket = resolution.get("raw_ticket") or {}
@@ -248,9 +238,6 @@ class KnowledgePipeline:
                 continue
             if source_text not in transcript:
                 continue
-            if self._contains_pii(source_text):
-                logger.warning("PII detected in extracted fact source; skipping entry")
-                continue
             if not (30 <= len(fact_text) <= 500):
                 continue
             validated.append({
@@ -262,7 +249,10 @@ class KnowledgePipeline:
 
     # ------------------------------------------------------------------
     def enqueue_resolution(self, resolution_doc: Dict[str, Any], persona: Optional[str] = None) -> None:
-        persona_slug = (persona or self.default_persona).lower().replace(" ", "_")
+        persona_slug = (persona or resolution_doc.get("target_persona") or "").strip().lower().replace(" ", "_")
+        if not persona_slug:
+            logger.warning("Skipping resolution %s – no persona specified", resolution_doc.get("ticket_id"))
+            return
         payload = {
             "resolution_id": resolution_doc.get("ticket_id"),
             "persona": persona_slug,
@@ -286,8 +276,25 @@ class KnowledgePipeline:
         )
         if not doc:
             return False
-        persona = doc.get("persona") or self.default_persona
         resolution = doc.get("resolution", {})
+        persona = (
+            doc.get("persona")
+            or resolution.get("target_persona")
+            or self.default_persona
+            or ""
+        ).strip().lower().replace(" ", "_")
+        if not persona:
+            self.db[self.queue_collection].update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"status": "error", "error": "persona_missing", "updated_at": datetime.now(timezone.utc)}},
+            )
+            return False
+        logger.info(
+            "[KnowledgePipeline] Drafting article for ticket %s (queue_id=%s) targeting persona %s",
+            resolution.get("ticket_id"),
+            doc.get("_id"),
+            persona,
+        )
         draft = self._draft_article(resolution)
         if not draft:
             self.db[self.queue_collection].update_one(
@@ -321,6 +328,12 @@ class KnowledgePipeline:
         )
         publish_result = self._publish_article(persona, draft, resolution, approval_mode="auto")
         status = "published" if publish_result else "error"
+        logger.info(
+            "[KnowledgePipeline] Auto-publish %s for ticket %s under persona %s",
+            "succeeded" if publish_result else "failed",
+            resolution.get("ticket_id"),
+            persona,
+        )
         self.db[self.queue_collection].update_one(
             {"_id": doc["_id"]},
             {"$set": {"status": status, "published_article_id": publish_result, "updated_at": datetime.now(timezone.utc)}},
@@ -340,6 +353,12 @@ class KnowledgePipeline:
         if not draft:
             raise ValueError("Draft missing for queue item")
         publish_result = self._publish_article(persona, draft, resolution, approval_mode="manual")
+        logger.info(
+            "[KnowledgePipeline] Manual publish %s for ticket %s under persona %s",
+            "succeeded" if publish_result else "failed",
+            resolution.get("ticket_id"),
+            persona,
+        )
         now = datetime.now(timezone.utc)
         status = "published" if publish_result else "error"
         self.db[self.queue_collection].update_one(
@@ -478,13 +497,7 @@ class KnowledgePipeline:
         text = (article.get("full_text") or "").strip()
         if not text:
             return None
-        if self._contains_pii(text):
-            logger.warning("PII detected in article body for ticket %s; skipping publication", resolution.get("ticket_id"))
-            return None
         summary = article.get("summary") or resolution.get("problem_summary") or text[:280]
-        if self._contains_pii(summary):
-            logger.warning("PII detected in article summary for ticket %s; skipping publication", resolution.get("ticket_id"))
-            return None
         persona_collection = self._persona_collection(persona)
         ticket_id = resolution.get("ticket_id")
         if ticket_id:
@@ -492,6 +505,13 @@ class KnowledgePipeline:
                 {"doc_type": "knowledge", "source": "glpi_pipeline", "ticket_id": ticket_id}
             )
         article_embedding = self._embedding_fn([summary])[0]
+        chunks = self._split_chunks(text)
+        logger.info(
+            "[KnowledgePipeline] Publishing ticket %s into persona %s (chunks=%s)",
+            ticket_id,
+            persona,
+            len(chunks),
+        )
         duplicate = self._check_duplicate(persona, article_embedding)
         if duplicate:
             logger.info(
@@ -500,16 +520,12 @@ class KnowledgePipeline:
                 duplicate.get("_id"),
             )
             return str(duplicate.get("_id"))
-        chunks = self._split_chunks(text)
         embeddings = self._embedding_fn(chunks)
         approved_stamp = datetime.now(timezone.utc)
         article_doc_id = ObjectId()
         article_tags = article.get("tags") or []
         chunk_records: List[Dict[str, Any]] = []
         for idx, chunk in enumerate(chunks):
-            if self._contains_pii(chunk):
-                logger.warning("PII detected in chunk %s for ticket %s; aborting", idx, ticket_id)
-                return None
             chunk_records.append(
                 {
                     "chunk_index": idx,
@@ -542,5 +558,16 @@ class KnowledgePipeline:
             "approved": approval_mode,
             "source": "glpi_pipeline",
         }
+        logger.info(
+            "[KnowledgePipeline] Writing article %s for ticket %s into collection %s",
+            article_doc_id,
+            ticket_id,
+            persona_collection.name,
+        )
         persona_collection.replace_one({"_id": article_doc_id}, article_doc, upsert=True)
+        logger.info(
+            "[KnowledgePipeline] Article %s persisted with %s chunks",
+            article_doc_id,
+            len(chunk_records),
+        )
         return str(article_doc_id)

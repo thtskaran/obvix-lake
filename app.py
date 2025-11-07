@@ -663,11 +663,23 @@ def _map_glpi_impact(value: Optional[str]) -> int:
     return mapping.get((value or '').lower(), 2)
 
 
-def _format_transcript(history: List[Dict[str, str]], latest_user_message: str) -> str:
+def _format_transcript(
+    history: List[Dict[str, str]],
+    latest_user_message: str,
+    assistant_reply: Optional[str] = None,
+) -> str:
     turns = history[-20:]
     lines = [f"{turn.get('role', 'unknown')}: {turn.get('content', '')}" for turn in turns]
     if latest_user_message:
-        lines.append(f"user: {latest_user_message}")
+        already_has_latest = bool(
+            turns
+            and turns[-1].get("role") == "user"
+            and turns[-1].get("content") == latest_user_message
+        )
+        if not already_has_latest:
+            lines.append(f"user: {latest_user_message}")
+    if assistant_reply:
+        lines.append(f"assistant: {assistant_reply}")
     return "\n".join(lines)
 
 
@@ -679,8 +691,9 @@ def record_escalation_case(
     router_payload: Optional[Dict[str, Any]],
     rag_context: Optional[Dict[str, Any]] = None,
     escalation_reason: Optional[str] = None,
+    assistant_reply: Optional[str] = None,
 ):
-    transcript = _format_transcript(history, user_message)
+    transcript = _format_transcript(history, user_message, assistant_reply)
     classification = (router_payload or {}).get("classification", {})
     rag_chunks = (rag_context or {}).get("chunks") or []
     rag_metrics = (rag_context or {}).get("metrics") or {}
@@ -1078,6 +1091,7 @@ def chat_handler():
         if should_escalate:
             fsm.escalate()
             reason_text = "; ".join(escalation_reasons)
+            pending_reply = FINAL_STATE_RESPONSES['FinalState_Escalated']
             glpi_ticket_id = record_escalation_case(
                 user_id,
                 persona_name,
@@ -1086,8 +1100,9 @@ def chat_handler():
                 router_payload,
                 rag_context=rag_context,
                 escalation_reason=reason_text,
+                assistant_reply=pending_reply,
             )
-            response_content = FINAL_STATE_RESPONSES['FinalState_Escalated']
+            response_content = pending_reply
             if glpi_ticket_id:
                 response_content += f" Reference ticket #{glpi_ticket_id}."
             persist_rag_metrics(user_id, persona_name, rag_context, True, reason_text)
@@ -1153,6 +1168,7 @@ def chat_handler():
                     router_payload,
                     rag_context=rag_context,
                     escalation_reason=late_escalation_reason,
+                    assistant_reply=FINAL_STATE_RESPONSES['FinalState_Escalated'],
                 )
                 response_content = FINAL_STATE_RESPONSES['FinalState_Escalated']
                 if glpi_ticket_id:
