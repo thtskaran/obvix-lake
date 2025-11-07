@@ -21,12 +21,17 @@ from dotenv import load_dotenv
 import numpy as np
 from bson import ObjectId
 
-from services.glpi_service import GLPIClient, ResolutionExtractor, GLPISyncService
+from services.glpi_service import GLPIClient, GLPIEscalationManager, GLPISyncService, ResolutionExtractor
 from services.ticket_router import TicketRouter
 from services.knowledge_pipeline import KnowledgePipeline
 from services.analytics import TrendAnalyzer
 from services.feedback import FeedbackLoop
-from services.rag_utils import extract_query_terms, stream_article_chunks, stream_manual_chunks
+from services.rag_pipeline import (
+    HybridRAGPipeline,
+    evaluate_grounding,
+    format_chunks_for_prompt,
+    parse_self_rag_tokens,
+)
 
 # FSM Import
 from fsm import initialize_fsm_for_user
@@ -75,6 +80,9 @@ LLM_TEMP_LOW = 0.1
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
+RAG_JUDGE_MODEL = os.getenv("RAG_JUDGE_MODEL", "gpt-4o-mini")
+GROUNDING_FAIL_THRESHOLD = float(os.getenv("GROUNDING_FAIL_THRESHOLD", "0.60"))
+GROUNDING_CAUTION_THRESHOLD = float(os.getenv("GROUNDING_CAUTION_THRESHOLD", "0.85"))
 
 GLPI_ENABLED = all([GLPI_HOST, GLPI_APP_TOKEN, GLPI_API_TOKEN])
 
@@ -129,6 +137,17 @@ def short_completion(system_prompt: str, user_prompt: str, max_tokens: int = 120
         max_tokens=max_tokens,
     )
     return resp.choices[0].message.content.strip()
+
+
+rag_pipeline = HybridRAGPipeline(
+    db,
+    PERSONA_COLLECTION_PREFIX,
+    build_embeddings,
+    openai_client,
+    judge_model=RAG_JUDGE_MODEL,
+    top_k=5,
+    max_candidates=MAX_RAG_DOCS_TO_SCORE,
+)
 
 # ==============================================================================
 # DRIVE HELPERS
@@ -382,89 +401,15 @@ def get_relevant_history(user_id: str, k: int) -> list:
 # ==============================================================================
 
 
-def _collect_tagged_chunks(persona_collection, query_terms: List[str], limit: int) -> List[Dict[str, Any]]:
-    if not query_terms:
-        return []
-    results: List[Dict[str, Any]] = []
-    manual_cursor = (
-        persona_collection.find({"doc_type": "knowledge", "tags": {"$in": query_terms}})
-        .sort([("approved_at", DESCENDING), ("created_at", DESCENDING)])
-        .limit(limit)
-    )
-    for chunk in stream_manual_chunks(manual_cursor):
-        results.append(chunk)
-        if len(results) >= limit:
-            return results
-    article_cursor = (
-        persona_collection.find({"doc_type": "knowledge_article", "tags": {"$in": query_terms}})
-        .sort([("published_at", DESCENDING)])
-        .limit(limit)
-    )
-    for chunk in stream_article_chunks(article_cursor):
-        results.append(chunk)
-        if len(results) >= limit:
-            break
-    return results
-
-
-def _collect_vector_candidates(persona_collection, limit: int) -> List[Dict[str, Any]]:
-    candidates: List[Dict[str, Any]] = []
-    manual_cursor = (
-        persona_collection.find({"doc_type": "knowledge", "embedding": {"$exists": True}})
-        .limit(limit)
-    )
-    for chunk in stream_manual_chunks(manual_cursor, require_embedding=True):
-        if chunk.get("embedding"):
-            candidates.append(chunk)
-        if len(candidates) >= limit:
-            return candidates
-    article_cursor = (
-        persona_collection.find({"doc_type": "knowledge_article", "chunks.embedding": {"$exists": True}})
-        .limit(limit)
-    )
-    for chunk in stream_article_chunks(article_cursor, require_embedding=True):
-        if chunk.get("embedding"):
-            candidates.append(chunk)
-        if len(candidates) >= limit:
-            break
-    return candidates
-
-
-def get_persona_context(persona_name: str, query: str, k: int = 4) -> tuple:
+def get_persona_context(persona_name: str) -> tuple:
     collection_name = f"{PERSONA_COLLECTION_PREFIX}{persona_name}"
     persona_collection = db[collection_name]
     profile_doc = persona_collection.find_one({"doc_type": "profile"})
     model_settings = profile_doc["content"] if profile_doc else {}
     phrases_doc = persona_collection.find_one({"doc_type": "phrases"})
     common_phrases = phrases_doc["content"] if phrases_doc else ""
-    logging.info(f"Loaded persona {persona_name} with settings: {model_settings} and common phrases.")
-
-    rag_docs: List[Dict[str, Any]] = []
-    query_terms = extract_query_terms(query)
-    tagged = _collect_tagged_chunks(persona_collection, query_terms, k)
-    if tagged:
-        rag_docs = tagged
-    else:
-        query_embedding = openai_client.embeddings.create(input=[query], model=EMBEDDING_MODEL).data[0].embedding
-        candidates = _collect_vector_candidates(persona_collection, MAX_RAG_DOCS_TO_SCORE)
-        scored: List[Dict[str, Any]] = []
-        for candidate in candidates:
-            embedding = candidate.get("embedding")
-            if not embedding:
-                continue
-            scored.append({
-                **candidate,
-                "similarity": float(np.dot(query_embedding, embedding)),
-            })
-        scored.sort(key=lambda x: x["similarity"], reverse=True)
-        rag_docs = scored[:k]
-    rag_knowledge = (
-        "\n---\n".join([doc.get("content", "") for doc in rag_docs if doc.get("content")])
-        if rag_docs
-        else "No specific background knowledge provided."
-    )
-
-    return model_settings, common_phrases, rag_knowledge
+    logging.info(f"Loaded persona %s with settings keys: %s", persona_name, list(model_settings.keys()))
+    return model_settings, common_phrases
 
 # ==============================================================================
 # LLM HELPERS
@@ -528,6 +473,7 @@ resolution_extractor = ResolutionExtractor(_llm_json_call, build_embeddings)
 
 glpi_client: Optional[GLPIClient]
 glpi_sync_service: Optional[GLPISyncService]
+glpi_escalation_manager: Optional[GLPIEscalationManager]
 if GLPI_ENABLED:
     glpi_client = GLPIClient(GLPI_HOST, GLPI_APP_TOKEN, GLPI_API_TOKEN)
     glpi_sync_service = GLPISyncService(
@@ -540,10 +486,12 @@ if GLPI_ENABLED:
         resolution_collection=GLPI_RESOLUTIONS_COL,
         escalations_collection=SUPPORT_ESCALATIONS_COL,
     )
+    glpi_escalation_manager = GLPIEscalationManager(glpi_client)
     logging.info("✅ GLPI integration enabled. Host: %s", GLPI_HOST)
 else:
     glpi_client = None
     glpi_sync_service = None
+    glpi_escalation_manager = None
     logging.warning("⚠️ GLPI integration disabled – missing GLPI_* environment variables.")
 
 
@@ -645,7 +593,7 @@ def build_router_context(router_payload: Optional[Dict[str, Any]]) -> str:
 def construct_support_messages(
     model_settings,
     history,
-    rag_knowledge,
+    knowledge_block,
     common_phrases,
     fsm_state,
     user_profile: Dict[str, Any],
@@ -682,7 +630,14 @@ Constraints:
 User memory: {memory}
 Router context:\n{router_context}
 
-Knowledge base snippets:\n{rag_knowledge}
+Knowledge base snippets:\n{knowledge_block}
+
+Self-RAG protocol:
+1. BEFORE answering output [RELEVANT] if the knowledge is sufficient, otherwise output [IRRELEVANT].
+2. If [IRRELEVANT], respond with "I don't have information about this." and stop.
+3. If [RELEVANT], answer the query using ONLY the provided knowledge and cite sources like [kb_doc_001].
+4. AFTER your answer, output [GROUNDED] if every claim is cited or [UNGROUNDED] otherwise.
+5. Prefer [IRRELEVANT] or [UNGROUNDED] over guessing.
 """
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
@@ -722,11 +677,29 @@ def record_escalation_case(
     history: List[Dict[str, str]],
     user_message: str,
     router_payload: Optional[Dict[str, Any]],
+    rag_context: Optional[Dict[str, Any]] = None,
+    escalation_reason: Optional[str] = None,
 ):
     transcript = _format_transcript(history, user_message)
     classification = (router_payload or {}).get("classification", {})
+    rag_chunks = (rag_context or {}).get("chunks") or []
+    rag_metrics = (rag_context or {}).get("metrics") or {}
+    similarity_scores = rag_metrics.get("similarity_scores") or []
+    reason_text = escalation_reason or "Escalated based on routing rules"
     ticket_id = None
-    if glpi_client:
+    if glpi_escalation_manager:
+        try:
+            resp = glpi_escalation_manager.create_escalation_ticket(
+                user_query=user_message,
+                escalation_reason=reason_text,
+                retrieved_chunks=rag_chunks,
+                similarity_scores=similarity_scores,
+                conversation_context=transcript,
+            )
+            ticket_id = resp.get("ticket_id")
+        except Exception as exc:
+            logging.error("GLPI escalation ticket failed: %s", exc)
+    elif glpi_client:
         body = (
             f"Persona: {persona_name}\nUser ID: {user_id}\n"
             f"Router classification: {json.dumps(classification, indent=2)}\n\n"
@@ -735,8 +708,8 @@ def record_escalation_case(
         payload = {
             "name": f"[Auto Escalation] {classification.get('issue_category', 'Support case').title()} - {user_id}",
             "content": body,
-            "status": 1,  # new
-            "type": 1,  # incident
+            "status": 1,
+            "type": 1,
             "urgency": _map_glpi_urgency(classification.get('urgency')),
             "impact": _map_glpi_impact(classification.get('impact_scope')),
             "requesttypes_id": 1,
@@ -744,17 +717,27 @@ def record_escalation_case(
         try:
             resp = glpi_client.create_ticket(payload)
             ticket_id = resp.get("id") or resp.get("ticket_id")
-            logging.info("Created GLPI ticket %s for user %s", ticket_id, user_id)
         except Exception as exc:
-            logging.error("GLPI escalation ticket failed: %s", exc)
+            logging.error("GLPI fallback ticket failed: %s", exc)
 
     doc = {
         "user_id": user_id,
         "persona": persona_name,
         "ticket_id": ticket_id,
+        "escalation_reason": reason_text,
         "router_classification": classification,
         "router_payload": router_payload,
         "transcript": transcript,
+        "rag_metrics": rag_metrics,
+        "rag_chunks": [
+            {
+                "doc_id": chunk.get("doc_id"),
+                "citation_id": chunk.get("citation_id"),
+                "preview": chunk.get("preview") or (chunk.get("content") or "")[:200],
+                "similarity": chunk.get("similarity_score"),
+            }
+            for chunk in rag_chunks
+        ],
         "created_at": datetime.now(timezone.utc),
     }
     db[SUPPORT_ESCALATIONS_COL].insert_one(doc)
@@ -764,6 +747,37 @@ def record_escalation_case(
         upsert=True,
     )
     return ticket_id
+
+
+def persist_rag_metrics(
+    user_id: str,
+    persona_name: str,
+    rag_context: Optional[Dict[str, Any]],
+    escalated: bool,
+    escalation_reason: Optional[str],
+):
+    if not rag_context:
+        return
+    metrics = rag_context.get("metrics") or {}
+    try:
+        db[SYSTEM_METRICS_COL].insert_one(
+            {
+                "user_id": user_id,
+                "persona": persona_name,
+                "timestamp": datetime.now(timezone.utc),
+                "retrieval_metrics": metrics.get("retrieval_metrics"),
+                "validation_metrics": metrics.get("validation_metrics"),
+                "similarity_scores": metrics.get("similarity_scores"),
+                "decision": rag_context.get("decision"),
+                "confidence": rag_context.get("confidence"),
+                "response_metrics": {
+                    "escalated": escalated,
+                    "escalation_reason": escalation_reason,
+                },
+            }
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.warning("Failed to persist RAG metrics: %s", exc)
 
 
 # ==============================================================================
@@ -1023,7 +1037,13 @@ def chat_handler():
     )
 
     try:
-        model_settings, common_phrases, rag_knowledge = get_persona_context(persona_name, user_message or "Introduction")
+        model_settings, common_phrases = get_persona_context(persona_name)
+        rag_context = rag_pipeline.build_context(persona_name, user_message or "Introduction")
+        retrieved_chunks = rag_context.get("chunks") or []
+        knowledge_block = format_chunks_for_prompt(retrieved_chunks)
+        response_prefix = rag_context.get("response_prefix", "")
+        rag_reason = rag_context.get("reason")
+        rag_escalation = rag_context.get("decision") == "escalate"
 
         router_payload = None
         if ticket_router and user_message:
@@ -1043,26 +1063,44 @@ def chat_handler():
         needs_supervisor = bool(classification.get("needs_supervisor"))
         requires_human = bool(classification.get("requires_human"))
         has_rag_matches = bool((router_payload or {}).get("matches"))
-        should_escalate = needs_supervisor or (requires_human and not has_rag_matches)
+
+        escalation_reasons: List[str] = []
+        if rag_escalation:
+            escalation_reasons.append(rag_reason or "RAG validation gate triggered escalation")
+        if needs_supervisor:
+            escalation_reasons.append("Ticket router requested supervisor involvement")
+        if requires_human and not has_rag_matches:
+            escalation_reasons.append("Ticket router requires human handoff due to missing KB coverage")
+
+        should_escalate = bool(escalation_reasons)
 
         glpi_ticket_id = None
         if should_escalate:
             fsm.escalate()
+            reason_text = "; ".join(escalation_reasons)
             glpi_ticket_id = record_escalation_case(
-                user_id, persona_name, history, user_message, router_payload
+                user_id,
+                persona_name,
+                history,
+                user_message,
+                router_payload,
+                rag_context=rag_context,
+                escalation_reason=reason_text,
             )
             response_content = FINAL_STATE_RESPONSES['FinalState_Escalated']
             if glpi_ticket_id:
                 response_content += f" Reference ticket #{glpi_ticket_id}."
+            persist_rag_metrics(user_id, persona_name, rag_context, True, reason_text)
         elif router_payload and router_payload.get("decision") == "auto_resolved" and router_payload.get("resolution_proposal"):
             fsm.mark_resolved()
             response_content = "Here's what typically fixes this scenario:\n" + router_payload["resolution_proposal"]
+            persist_rag_metrics(user_id, persona_name, rag_context, False, None)
         else:
             fsm.progress()
             llm_messages = construct_support_messages(
                 model_settings,
                 history,
-                rag_knowledge,
+                knowledge_block,
                 common_phrases,
                 fsm.state,
                 user_profile,
@@ -1074,7 +1112,56 @@ def chat_handler():
             ai_response = openai_client.chat.completions.create(
                 model=CHAT_MODEL, messages=llm_messages, temperature=0.25, max_tokens=220
             )
-            response_content = ai_response.choices[0].message.content
+            raw_response = ai_response.choices[0].message.content or ""
+            reflection = parse_self_rag_tokens(raw_response)
+            validation_metrics = (
+                rag_context.setdefault("metrics", {}).setdefault("validation_metrics", {})
+            )
+            validation_metrics["self_rag_relevant"] = reflection.get("relevance_flag") == "RELEVANT"
+            validation_metrics["self_rag_grounded"] = reflection.get("grounding_flag") == "GROUNDED"
+
+            late_escalation_reason = None
+            if reflection.get("relevance_flag") == "IRRELEVANT":
+                late_escalation_reason = "LLM determined content irrelevant"
+            elif reflection.get("grounding_flag") == "UNGROUNDED":
+                late_escalation_reason = "Answer flagged as UNGROUNDED by Self-RAG"
+
+            answer_body = reflection.get("answer", raw_response).strip()
+            if response_prefix and not answer_body.startswith(response_prefix):
+                answer_body = response_prefix + answer_body
+
+            grounding_stats = evaluate_grounding(answer_body, retrieved_chunks)
+            validation_metrics.update(grounding_stats)
+            grounding_score = grounding_stats.get("grounding_score", 0.0)
+            if not late_escalation_reason and grounding_score < GROUNDING_FAIL_THRESHOLD:
+                late_escalation_reason = (
+                    f"Answer grounding score {grounding_score:.2f} below threshold"
+                )
+            elif GROUNDING_FAIL_THRESHOLD <= grounding_score < GROUNDING_CAUTION_THRESHOLD:
+                answer_body = (
+                    f"⚠️ LIMITED CONFIDENCE: {answer_body}\n\n"
+                    "Note: Some claims have weak support."
+                )
+
+            if late_escalation_reason:
+                fsm.escalate()
+                glpi_ticket_id = record_escalation_case(
+                    user_id,
+                    persona_name,
+                    history,
+                    user_message,
+                    router_payload,
+                    rag_context=rag_context,
+                    escalation_reason=late_escalation_reason,
+                )
+                response_content = FINAL_STATE_RESPONSES['FinalState_Escalated']
+                if glpi_ticket_id:
+                    response_content += f" Reference ticket #{glpi_ticket_id}."
+                persist_rag_metrics(user_id, persona_name, rag_context, True, late_escalation_reason)
+            else:
+                response_content = answer_body
+                rag_context["decision"] = "respond"
+                persist_rag_metrics(user_id, persona_name, rag_context, False, None)
 
         save_message_to_history(user_id, "assistant", response_content)
         db[USER_PROFILES_COL].update_one(
@@ -1087,6 +1174,16 @@ def chat_handler():
             payload["router"] = router_payload
         if glpi_ticket_id:
             payload["glpi_ticket_id"] = glpi_ticket_id
+        if 'rag_context' in locals() and rag_context:
+            payload["confidence"] = rag_context.get("confidence")
+            payload["sources"] = [
+                {
+                    "id": chunk.get("citation_id"),
+                    "source": chunk.get("source") or (chunk.get("metadata") or {}).get("source_ticket_id"),
+                    "preview": chunk.get("preview") or (chunk.get("content") or "")[:200],
+                }
+                for chunk in (rag_context.get("chunks") or [])
+            ]
         return jsonify(payload), 200
 
     except Exception as e:

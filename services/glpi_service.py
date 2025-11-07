@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 import requests
 from dateutil import parser as date_parser
@@ -425,3 +425,80 @@ class GLPISyncService:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error("GLPI sync loop error: %s", exc)
             time.sleep(interval_seconds)
+
+
+class GLPIEscalationManager:
+    """Creates richly-contextualized GLPI tickets when the chatbot escalates."""
+
+    def __init__(self, client: GLPIClient) -> None:
+        self.client = client
+
+    def create_escalation_ticket(
+        self,
+        *,
+        user_query: str,
+        escalation_reason: str,
+        retrieved_chunks: Sequence[Dict[str, Any]],
+        similarity_scores: Sequence[float],
+        conversation_context: str,
+    ) -> Dict[str, Any]:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        chunk_lines: List[str] = []
+        for idx, chunk in enumerate(retrieved_chunks):
+            preview = (chunk.get("preview") or chunk.get("content") or "").strip()
+            preview = preview[:200] + ("..." if len(preview) > 200 else "")
+            score = similarity_scores[idx] if idx < len(similarity_scores) else chunk.get("similarity_score", 0.0)
+            chunk_lines.append(f"[{idx + 1}] Score: {score:.2f} - {preview}")
+        if not chunk_lines:
+            chunk_lines.append("No retrieved knowledge snippets available.")
+        body = (
+            "AUTOMATED ESCALATION FROM CHATBOT\n"
+            f"Timestamp: {timestamp}\n"
+            f"Reason: {escalation_reason}\n\n"
+            f"USER QUERY:\n{user_query}\n\n"
+            "RETRIEVED CHUNKS:\n"
+            + "\n".join(chunk_lines)
+            + "\n\nCONVERSATION CONTEXT:\n"
+            + conversation_context
+            + "\n\nACTION REQUIRED:\n- Review the user's problem and craft a grounded response.\n"
+            + "- Update the knowledge base if a gap is confirmed."
+        )
+        payload = {
+            "name": f"[ESCALATION] {user_query[:60]}",
+            "content": body,
+            "status": 1,
+            "type": 1,
+            "urgency": 3,
+            "impact": 3,
+            "category": "knowledge_base_gap",
+            "source": "chatbot_escalation",
+        }
+        response = self.client.create_ticket(payload)
+        ticket_id = response.get("id") or response.get("ticket_id")
+        return {
+            "status": "ESCALATED",
+            "ticket_id": ticket_id,
+            "raw": response,
+        }
+
+    def send_customer_response(self, ticket_id: Any, message: str) -> bool:
+        followup_payload = {
+            "input": {
+                "itemtype": "Ticket",
+                "items_id": ticket_id,
+                "content": message,
+            }
+        }
+        try:
+            self.client.init_session()
+            resp = self.client.session.post(
+                self.client._url("Ticket/{}/ITILFollowup".format(ticket_id)),
+                headers=self.client._session_headers(),
+                json=followup_payload,
+                timeout=self.client.request_timeout,
+                verify=self.client.verify_ssl,
+            )
+            return resp.status_code in {200, 201}
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Failed to post GLPI follow-up for %s: %s", ticket_id, exc)
+            return False

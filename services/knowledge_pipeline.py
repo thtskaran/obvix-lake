@@ -39,6 +39,9 @@ _STOPWORDS = {
     "req",
 }
 
+_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_PATTERN = re.compile(r"\+?\d[\d\-() ]{6,}\d")
+
 
 def _cosine(a: List[float], b: List[float]) -> float:
     va = np.array(a)
@@ -132,6 +135,12 @@ class KnowledgePipeline:
             cleaned = self._derive_issue_tags(resolution)
         return cleaned[:3]
 
+    def _contains_pii(self, text: Optional[str]) -> bool:
+        if not text:
+            return False
+        sample = text.strip()
+        return bool(_EMAIL_PATTERN.search(sample) or _PHONE_PATTERN.search(sample))
+
     def _compose_transcript(self, resolution: Dict[str, Any], max_chars: int = 6000) -> str:
         raw_ticket = resolution.get("raw_ticket") or {}
         sections: List[str] = []
@@ -213,6 +222,43 @@ class KnowledgePipeline:
             sections.append("\n".join(rec_lines))
         compiled = "\n\n".join(section for section in sections if section.strip())
         return compiled.strip()
+
+    def _extract_validated_facts(self, transcript: str) -> List[Dict[str, Any]]:
+        if not transcript:
+            return []
+        system = (
+            "You are a knowledge base extraction assistant. Extract ONLY facts that are explicitly stated "
+            "inside the provided ticket transcript. Return STRICT JSON as an array of objects with keys "
+            "fact, source, confidence (HIGH|MEDIUM|LOW)."
+        )
+        payload = json.dumps({"ticket_conversation": transcript}, ensure_ascii=False)
+        fallback: List[Dict[str, Any]] = []
+        result = self._llm_json_fn(system, payload, fallback)
+        rows: List[Dict[str, Any]] = []
+        if isinstance(result, list):
+            rows = result
+        elif isinstance(result, dict) and isinstance(result.get("facts"), list):
+            rows = result.get("facts") or []
+        validated: List[Dict[str, Any]] = []
+        for entry in rows:
+            fact_text = (entry.get("fact") or entry.get("Fact") or "").strip()
+            source_text = (entry.get("source") or entry.get("Source") or "").strip()
+            confidence = (entry.get("confidence") or entry.get("Confidence") or "LOW").upper()
+            if not fact_text or not source_text:
+                continue
+            if source_text not in transcript:
+                continue
+            if self._contains_pii(source_text):
+                logger.warning("PII detected in extracted fact source; skipping entry")
+                continue
+            if not (30 <= len(fact_text) <= 500):
+                continue
+            validated.append({
+                "fact": fact_text,
+                "source": source_text,
+                "confidence": confidence,
+            })
+        return validated
 
     # ------------------------------------------------------------------
     def enqueue_resolution(self, resolution_doc: Dict[str, Any], persona: Optional[str] = None) -> None:
@@ -318,6 +364,7 @@ class KnowledgePipeline:
         if not resolution:
             return None
         transcript = self._compose_transcript(resolution)
+        validated_facts = self._extract_validated_facts(transcript)
         steps = resolution.get("solution_steps") or []
         steps_text = "\n".join([f"{idx + 1}. {step}" for idx, step in enumerate(steps)]) or "No technician steps captured."
         resolution_brief = (
@@ -386,6 +433,7 @@ class KnowledgePipeline:
         elif not article.get("full_text"):
             article["full_text"] = fallback["full_text"] or composed
         article["transcript_excerpt"] = transcript
+        article["validated_facts"] = validated_facts
         return article
 
     def _check_duplicate(self, persona: str, embedding: List[float]) -> Optional[Dict[str, Any]]:
@@ -398,7 +446,7 @@ class KnowledgePipeline:
         similarities = [(_cosine(embedding, doc["article_embedding"]), doc) for doc in existing]
         similarities.sort(key=lambda pair: pair[0], reverse=True)
         top = similarities[0]
-        if top[0] >= 0.9:
+        if top[0] >= 0.85:
             return top[1]
         return None
 
@@ -430,7 +478,13 @@ class KnowledgePipeline:
         text = (article.get("full_text") or "").strip()
         if not text:
             return None
+        if self._contains_pii(text):
+            logger.warning("PII detected in article body for ticket %s; skipping publication", resolution.get("ticket_id"))
+            return None
         summary = article.get("summary") or resolution.get("problem_summary") or text[:280]
+        if self._contains_pii(summary):
+            logger.warning("PII detected in article summary for ticket %s; skipping publication", resolution.get("ticket_id"))
+            return None
         persona_collection = self._persona_collection(persona)
         ticket_id = resolution.get("ticket_id")
         if ticket_id:
@@ -453,6 +507,9 @@ class KnowledgePipeline:
         article_tags = article.get("tags") or []
         chunk_records: List[Dict[str, Any]] = []
         for idx, chunk in enumerate(chunks):
+            if self._contains_pii(chunk):
+                logger.warning("PII detected in chunk %s for ticket %s; aborting", idx, ticket_id)
+                return None
             chunk_records.append(
                 {
                     "chunk_index": idx,
@@ -478,6 +535,7 @@ class KnowledgePipeline:
             "article_embedding": article_embedding,
             "source_ticket_id": ticket_id,
             "ticket_transcript": transcript_excerpt,
+            "validated_facts": article.get("validated_facts") or [],
             "published_at": approved_stamp,
             "approved_at": approved_stamp,
             "auto_generated": True,

@@ -26,10 +26,17 @@ It continually enriches a lightweight CRM / ticket profile in MongoDB and uses t
 ```json
 {
   "message": "assistant's reply text",
-  "fsm_state": "Phase2_NeedsDiscovery",
-  "flow": "inbound | outbound_lead | outbound_existing"   // present when resolved
+  "fsm_state": "Phase2_Diagnostics",
+  "confidence": "HIGH",
+  "sources": [
+    {"id": "kb_doc_001", "source": "ticket_12345", "preview": "Reboot firewall and reapply policy"}
+  ],
+  "glpi_ticket_id": "24857",            // present only when escalated
+  "router": { ... }                       // ticket router payload when available
 }
 ```
+
+`confidence` reflects the hybrid retrieval + grounding gates (HIGH or LOW). `sources` enumerates every chunk cited in the response so downstream clients can build inline references. When the validation gates fail, `glpi_ticket_id` is returned after the deterministic handoff to GLPI.
 
 **GET `/personas`**
 
@@ -104,6 +111,26 @@ Inside every persona folder place plain-text docs:
 * Any other `.txt` file → **knowledge chunks** (ingested with embeddings)
 
 When you call `/chat`, pass the same folder name (e.g. `"ol_residential_broadband"`). There is no default persona; requests must always specify which persona to use.
+
+### Hybrid retrieval + validation gates
+
+* Every turn now runs a **dual-channel retriever** (BM25 lexical + semantic embeddings) fused with weighted reciprocal rank (60% semantic / 40% lexical).
+* Retrieved chunks are scored by three gates **before** an answer is attempted:
+  1. Similarity thresholds (`avg ≥ 0.75`, `max ≥ 0.80` proceed; `< 0.60` escalates).
+  2. A lightweight **LLM relevance judge** (default `RAG_JUDGE_MODEL=gpt-4o-mini`) that responds YES/NO.
+  3. `context_precision` heuristic measuring term overlap ( <0.40 escalates, <0.60 replies with a LOW confidence preamble).
+* When any gate fails the request is escalated deterministically with the failing metrics embedded into the GLPI ticket body.
+* The generation prompt uses **Self-RAG reflection tokens**: the model must emit `[RELEVANT]/[IRRELEVANT]` before answering and `[GROUNDED]/[UNGROUNDED]` afterwards. `[IRRELEVANT]` or `[UNGROUNDED]` forces a human escalation.
+* After generation, a groundedness heuristic computes a score; `GROUNDING_FAIL_THRESHOLD` (default `0.60`) triggers escalation, while scores between 0.60–0.85 prepend a limited-confidence warning.
+* Responses always cite chunks as `[kb_doc_###]`. The raw response payload exposes those chunks so clients can render inline references.
+
+Environment knobs:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RAG_JUDGE_MODEL` | `gpt-4o-mini` | LLM used for the YES/NO relevance judge. |
+| `GROUNDING_FAIL_THRESHOLD` | `0.60` | Minimum acceptable grounding score before escalation. |
+| `GROUNDING_CAUTION_THRESHOLD` | `0.85` | Below this score the user receives a caution banner. |
 
 ---
 
@@ -195,6 +222,9 @@ User: “Multiple branches offline; MPLS circuit down, carrier ticket #4390.”
 * **No OTP/sensitive data** requests—ever.
 * **Email capture** is regex-assisted if user embeds it in any message.
 * **Type safety**: numeric fields (e.g., `devices_count`, `household_size`, `plan_speed_mbps`) are normalized when detectable, enabling downstream analytics.
+* **Validated facts only**: the GLPI knowledge pipeline now extracts fact/source pairs and verifies that each source sentence exists in the original transcript. Items containing PII or missing citations are dropped before indexing.
+* **PII scanner**: GLPI-derived articles are rejected if any chunk contains emails/phone numbers, preventing leakage into the vector store.
+* **Observability**: every RAG turn logs retrieval, judge, and grounding metrics to `system_metrics`, enabling dashboards/alerts that mirror the spec.
 
 ---
 
