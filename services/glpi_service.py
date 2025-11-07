@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import requests
 from dateutil import parser as date_parser
@@ -108,15 +108,11 @@ class GLPIClient:
             logger.error("Failed to fetch GLPI ticket %s: %s", ticket_id, exc)
             return None
 
-    def search_closed_tickets(self, since: datetime, limit: int = 100) -> List[Dict[str, Any]]:
-        """Search recently closed tickets and return lightweight rows."""
+    def _search_tickets(self, criteria: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
         payload = {
-            "criteria": [
-                {"field": "15", "searchtype": "greaterthan", "value": since.strftime(ISO_FORMAT)},  # closedate
-                {"link": "AND", "field": "12", "searchtype": "contains", "value": "solved"},  # status contains solved/closed text
-            ],
-            "forcedisplay": ["2", "1", "12", "15", "5"],
-            "order": "ASC",
+            "criteria": criteria,
+            "forcedisplay": ["2", "1", "12", "15", "16", "5"],
+            "order": "DESC",
             "sort": 15,
             "range": f"0-{limit}",
         }
@@ -135,6 +131,28 @@ class GLPIClient:
         except Exception as exc:
             logger.error("GLPI ticket search failed: %s", exc)
             return []
+
+    def search_closed_tickets(self, since: datetime, limit: int = 100) -> List[Dict[str, Any]]:
+        """Search recently closed tickets and return lightweight rows."""
+        since_str = since.strftime(ISO_FORMAT)
+        criteria_sets = [
+            [{"field": "15", "searchtype": "greaterthan", "value": since_str}],  # closedate
+            [{"field": "16", "searchtype": "greaterthan", "value": since_str}],  # solvedate
+        ]
+        rows: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for criteria in criteria_sets:
+            if len(rows) >= limit:
+                break
+            for row in self._search_tickets(criteria, limit):
+                ticket_id = row.get("2") or row.get("id") or row.get("Ticket.id")
+                if not ticket_id or ticket_id in seen:
+                    continue
+                seen.add(ticket_id)
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
+        return rows
 
     def fetch_closed_tickets_since(self, since: datetime, limit: int = 50) -> List[Dict[str, Any]]:
         rows = self.search_closed_tickets(since, limit=limit)
@@ -158,7 +176,6 @@ class GLPIClient:
             ticket["closed_at"] = closed_at
             tickets.append(ticket)
         return tickets
-
 
     def create_ticket(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         body = payload if "input" in payload else {"input": payload}
@@ -267,6 +284,7 @@ class GLPISyncService:
         state_collection: str = "glpi_sync_state",
         raw_collection: str = "glpi_tickets",
         resolution_collection: str = "glpi_resolutions",
+        escalations_collection: str = "support_escalations",
     ) -> None:
         self.db = db
         self.client = glpi_client
@@ -275,6 +293,54 @@ class GLPISyncService:
         self.state_collection = state_collection
         self.raw_collection = raw_collection
         self.resolution_collection = resolution_collection
+        self.escalations_collection = escalations_collection
+
+    def _escalated_ticket_ids(self) -> List[int]:
+        cursor = self.db[self.escalations_collection].find(
+            {"ticket_id": {"$exists": True, "$ne": None}},
+            {"ticket_id": 1},
+        )
+        ticket_ids: List[int] = []
+        for doc in cursor:
+            try:
+                ticket_ids.append(int(doc.get("ticket_id")))
+            except (TypeError, ValueError):
+                continue
+        return ticket_ids
+
+    def _fetch_escalated_closures(self) -> List[Dict[str, Any]]:
+        tickets: List[Dict[str, Any]] = []
+        for ticket_id in self._escalated_ticket_ids():
+            if self.db[self.resolution_collection].find_one({"ticket_id": ticket_id}):
+                continue
+            ticket = self.client.get_ticket(ticket_id)
+            if not ticket:
+                continue
+            closed_value = ticket.get("closedate") or ticket.get("solvedate")
+            if not closed_value:
+                continue
+            try:
+                closed_at = date_parser.parse(closed_value)
+            except (ValueError, TypeError):
+                closed_at = None
+            ticket["closed_at"] = closed_at
+            tickets.append(ticket)
+        return tickets
+
+    def _persona_for_ticket(self, ticket_id: Any) -> Optional[str]:
+        if ticket_id is None:
+            return None
+        lookup_ids = [ticket_id]
+        if not isinstance(ticket_id, str):
+            lookup_ids.append(str(ticket_id))
+        doc = self.db[self.escalations_collection].find_one(
+            {"ticket_id": {"$in": lookup_ids}},
+            {"persona": 1},
+        )
+        persona = (doc or {}).get("persona")
+        if not persona:
+            return None
+        return persona.lower().replace(" ", "_")
 
     # ------------------------------------------------------------------
     def _state_doc(self) -> Dict[str, Any]:
@@ -289,12 +355,22 @@ class GLPISyncService:
         last_synced: datetime = state.get("last_synced_at", datetime.now(timezone.utc) - timedelta(hours=6))
         logger.info("Starting GLPI sync since %s", last_synced)
         tickets = self.client.fetch_closed_tickets_since(last_synced, limit=100)
+        escalated_tickets = self._fetch_escalated_closures()
+        if escalated_tickets:
+            indexed = {ticket.get("id"): ticket for ticket in tickets if ticket.get("id")}
+            for ticket in escalated_tickets:
+                tid = ticket.get("id")
+                if not tid:
+                    continue
+                indexed[tid] = ticket
+            tickets = list(indexed.values())
         processed = 0
         created = 0
         for ticket in tickets:
             ticket_id = ticket.get("id")
             if not ticket_id:
                 continue
+            persona_override = self._persona_for_ticket(ticket_id)
             ticket_doc = {**ticket}
             ticket_doc["synced_at"] = datetime.now(timezone.utc)
             self.db[self.raw_collection].update_one({"ticket_id": ticket_id}, {"$set": ticket_doc}, upsert=True)
@@ -302,6 +378,8 @@ class GLPISyncService:
             if not resolution:
                 continue
             resolution["ticket_id"] = ticket_id
+            if persona_override:
+                resolution["target_persona"] = persona_override
             self.db[self.resolution_collection].update_one(
                 {"ticket_id": ticket_id},
                 {"$set": resolution},
@@ -311,7 +389,7 @@ class GLPISyncService:
             processed += 1
             if self.resolution_handler:
                 try:
-                    self.resolution_handler(resolution)
+                    self.resolution_handler(resolution, persona=persona_override)
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.error("Resolution handler failed for ticket %s: %s", ticket_id, exc)
 

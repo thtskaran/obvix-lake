@@ -94,22 +94,37 @@ class TicketRouter:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         persona_slug = persona.lower().replace(" ", "_")
-        classification = self.classify(ticket_text, metadata)
+        classification = self.classify(ticket_text, metadata) or {}
         embedding = self._embedding_fn([ticket_text])[0]
         matches = self._top_knowledge_matches(persona_slug, embedding)
         top_score = matches[0]["similarity"] if matches else 0.0
-        auto_ok = (
-            bool(matches)
-            and top_score >= self.auto_resolution_threshold
-            and not bool(classification.get("requires_human", True))
-        )
-        decision = "auto_resolved" if auto_ok else "human_agent"
+        has_matches = bool(matches)
+        auto_eligible = has_matches and top_score >= self.auto_resolution_threshold
+
+        if auto_eligible:
+            classification["requires_human"] = False
+            classification["needs_supervisor"] = False
+
+        auto_ok = auto_eligible and not bool(classification.get("requires_human", True))
+        assistive_mode = has_matches and not auto_ok
+
+        if assistive_mode and classification.get("requires_human"):
+            # Override spurious human flags when the router still surfaced helpful context
+            classification["requires_human"] = False
+
+        if auto_ok:
+            decision = "auto_resolved"
+        elif assistive_mode:
+            decision = "assistive"
+        else:
+            decision = "human_agent"
         audit_doc = {
             "ticket_id": ticket_id,
             "persona": persona_slug,
             "decision": decision,
             "classification": classification,
             "top_similarity": top_score,
+            "assistive_mode": assistive_mode,
             "timestamp": datetime.now(timezone.utc),
         }
         self.db[self.audit_collection].insert_one(audit_doc)
@@ -119,6 +134,8 @@ class TicketRouter:
             "decision": decision,
             "classification": classification,
             "matches": matches,
+            "assistive": assistive_mode,
+            "top_similarity": top_score,
         }
         if auto_ok:
             response["resolution_proposal"] = matches[0]["content"]

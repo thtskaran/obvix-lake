@@ -19,6 +19,7 @@ from openai import OpenAI
 from pymongo import MongoClient, UpdateOne, errors, ASCENDING, DESCENDING
 from dotenv import load_dotenv
 import numpy as np
+from bson import ObjectId
 
 from services.glpi_service import GLPIClient, ResolutionExtractor, GLPISyncService
 from services.ticket_router import TicketRouter
@@ -47,10 +48,11 @@ GLPI_HOST = os.getenv("GLPI_HOST")
 GLPI_APP_TOKEN = os.getenv("GLPI_APP_TOKEN")
 GLPI_API_TOKEN = os.getenv("GLPI_API_TOKEN")
 DEFAULT_SUPPORT_PERSONA = os.getenv("DEFAULT_SUPPORT_PERSONA", "ol_technical_and_diagnostics")
-GLPI_SYNC_INTERVAL_SECONDS = int(os.getenv("GLPI_SYNC_INTERVAL_SECONDS", "1800"))
+GLPI_SYNC_INTERVAL_SECONDS = int(os.getenv("GLPI_SYNC_INTERVAL_SECONDS", "30"))
 KNOWLEDGE_PIPELINE_INTERVAL_SECONDS = int(os.getenv("KNOWLEDGE_PIPELINE_INTERVAL_SECONDS", "60"))
 ANALYTICS_REFRESH_INTERVAL_SECONDS = int(os.getenv("ANALYTICS_REFRESH_INTERVAL_SECONDS", "600"))
 METRICS_REFRESH_INTERVAL_SECONDS = int(os.getenv("METRICS_REFRESH_INTERVAL_SECONDS", "900"))
+KNOWLEDGE_AUTO_APPROVE = os.getenv("KNOWLEDGE_AUTO_APPROVE", "true").lower() == "true"
 
 # DB & Model Config
 DB_NAME = "obvix_lake_db"
@@ -70,8 +72,15 @@ PERSONA_COLLECTION_PREFIX = "persona_"
 EMBEDDING_MODEL = "text-embedding-3-large"
 CHAT_MODEL = "gpt-4o"
 LLM_TEMP_LOW = 0.1
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+]
 
 GLPI_ENABLED = all([GLPI_HOST, GLPI_APP_TOKEN, GLPI_API_TOKEN])
+
+# Persona folder cache for Drive Docs placement
+PERSONA_FOLDER_INDEX: Dict[str, str] = {}
+PERSONA_FOLDER_LOCK = threading.Lock()
 
 # RAG & Flow Config
 MAX_HISTORY_MESSAGES_TO_RETRIEVE = 10
@@ -84,7 +93,7 @@ if not all([WATCH_FOLDER_ID, MONGO_URI, OPENAI_API_KEY]):
 # ==============================================================================
 try:
     creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+        SERVICE_ACCOUNT_FILE, scopes=GOOGLE_SCOPES
     )
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
     logging.info("✅ Google Drive client initialized.")
@@ -188,6 +197,38 @@ def upsert_persona_document(persona_name: str, file_id: str, file_name: str, tex
         if operations:
             persona_collection.bulk_write(operations)
 
+
+def _persona_slug(name: Optional[str]) -> str:
+    return (name or "").lower().replace(" ", "_")
+
+
+def _update_persona_folder_cache(persona_folders: List[Dict[str, Any]]):
+    mapping = {}
+    for folder in persona_folders:
+        slug = _persona_slug(folder.get("name"))
+        if slug:
+            mapping[slug] = folder.get("id")
+    with PERSONA_FOLDER_LOCK:
+        PERSONA_FOLDER_INDEX.clear()
+        PERSONA_FOLDER_INDEX.update({k: v for k, v in mapping.items() if v})
+
+
+def _get_persona_folder_id(persona_slug: str) -> Optional[str]:
+    with PERSONA_FOLDER_LOCK:
+        return PERSONA_FOLDER_INDEX.get(persona_slug)
+
+
+def _ensure_persona_folder(persona_slug: str) -> Optional[str]:
+    folder_id = _get_persona_folder_id(persona_slug)
+    if folder_id:
+        return folder_id
+    persona_folders = find_persona_folders_recursively(WATCH_FOLDER_ID)
+    if persona_folders:
+        _update_persona_folder_cache(persona_folders)
+    return _get_persona_folder_id(persona_slug)
+
+
+
 # ==============================================================================
 # SYNCER
 # ==============================================================================
@@ -237,6 +278,7 @@ def sync_drive_personas_task():
             logging.info("Starting persona sync cycle...")
             persona_folders = find_persona_folders_recursively(WATCH_FOLDER_ID)
             logging.info(f"Found {len(persona_folders)} persona folders: {[f['name'] for f in persona_folders]}")
+            _update_persona_folder_cache(persona_folders)
             for persona_folder in persona_folders:
                 persona_name = persona_folder["name"].lower().replace(" ", "_")
                 files_resp = (
@@ -308,6 +350,12 @@ def _spawn_daemon(name: str, target):
 
 
 def start_background_threads():
+    try:
+        initial_persona_folders = find_persona_folders_recursively(WATCH_FOLDER_ID)
+        if initial_persona_folders:
+            _update_persona_folder_cache(initial_persona_folders)
+    except Exception as exc:
+        logging.warning("Unable to prime persona folder cache: %s", exc)
     _spawn_daemon("drive_sync", sync_drive_personas_task)
     if glpi_sync_service:
         _spawn_daemon("glpi_sync", glpi_sync_worker)
@@ -388,6 +436,7 @@ knowledge_pipeline = KnowledgePipeline(
     build_embeddings,
     queue_collection=KNOWLEDGE_QUEUE_COL,
     articles_collection=KNOWLEDGE_ARTICLES_COL,
+    auto_approve=KNOWLEDGE_AUTO_APPROVE,
 )
 
 ticket_router = TicketRouter(
@@ -425,6 +474,7 @@ if GLPI_ENABLED:
         state_collection=GLPI_SYNC_STATE_COL,
         raw_collection=GLPI_RAW_TICKETS_COL,
         resolution_collection=GLPI_RESOLUTIONS_COL,
+        escalations_collection=SUPPORT_ESCALATIONS_COL,
     )
     logging.info("✅ GLPI integration enabled. Host: %s", GLPI_HOST)
 else:
@@ -707,6 +757,41 @@ FINAL_STATE_RESPONSES = {
     'FinalState_FollowUp': "I'll monitor things on our side. If the issue returns, share any new symptoms and we'll dig deeper.",
 }
 
+
+def _serialize_datetime(value: Any) -> Any:
+    return value.isoformat() if isinstance(value, datetime) else value
+
+
+def _serialize_queue_item(doc: Dict[str, Any]) -> Dict[str, Any]:
+    resolution = doc.get("resolution") or {}
+    resolution_copy = dict(resolution)
+    closed_at = resolution_copy.get("closed_at")
+    if isinstance(closed_at, datetime):
+        resolution_copy["closed_at"] = closed_at.isoformat()
+    resolution_copy.pop("summary_embedding", None)
+    return {
+        "id": str(doc.get("_id")),
+        "resolution_id": doc.get("resolution_id"),
+        "ticket_id": resolution.get("ticket_id"),
+        "persona": doc.get("persona"),
+        "status": doc.get("status"),
+        "created_at": _serialize_datetime(doc.get("created_at")),
+        "updated_at": _serialize_datetime(doc.get("updated_at")),
+        "lead_reviewed_at": _serialize_datetime(doc.get("lead_reviewed_at")),
+        "sme_reviewed_at": _serialize_datetime(doc.get("sme_reviewed_at")),
+        "approval_mode": doc.get("approval_mode"),
+        "approved_by": doc.get("approved_by"),
+        "draft": doc.get("draft"),
+        "resolution": resolution_copy,
+    }
+
+
+def _parse_object_id(value: str) -> Optional[ObjectId]:
+    try:
+        return ObjectId(value)
+    except Exception:
+        return None
+
 # ==============================================================================
 # API
 # ==============================================================================
@@ -720,6 +805,41 @@ def healthcheck():
     }
     statuses["glpi"] = _cached_health_check("glpi", 120, _check_glpi)
     return jsonify(statuses)
+
+
+@app.route('/knowledge/queue', methods=['GET'])
+def knowledge_queue_endpoint():
+    status_filter = request.args.get('status')
+    limit_param = request.args.get('limit', '50')
+    try:
+        limit = max(1, min(int(limit_param), 200))
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    if not status_filter and not KNOWLEDGE_AUTO_APPROVE:
+        status_filter = "awaiting_approval"
+    query = {"status": status_filter} if status_filter else {}
+    cursor = (
+        db[KNOWLEDGE_QUEUE_COL]
+        .find(query)
+        .sort("updated_at", DESCENDING)
+        .limit(limit)
+    )
+    items = [_serialize_queue_item(doc) for doc in cursor]
+    return jsonify({"items": items, "auto_approve": KNOWLEDGE_AUTO_APPROVE})
+
+
+@app.route('/knowledge/queue/<item_id>/approve', methods=['POST'])
+def approve_knowledge_queue_item(item_id: str):
+    queue_id = _parse_object_id(item_id)
+    if not queue_id:
+        return jsonify({"error": "invalid queue id"}), 400
+    payload = request.get_json() or {}
+    reviewer = payload.get("reviewer") or "manual_reviewer"
+    try:
+        result = knowledge_pipeline.approve_queue_item(queue_id, reviewer)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
 
 
 @app.route('/personas', methods=['GET'])
@@ -858,13 +978,18 @@ def chat_handler():
         classification = (router_payload or {}).get("classification", {})
         needs_supervisor = bool(classification.get("needs_supervisor"))
         requires_human = bool(classification.get("requires_human"))
+        has_rag_matches = bool((router_payload or {}).get("matches"))
+        should_escalate = needs_supervisor or (requires_human and not has_rag_matches)
 
-        if needs_supervisor or requires_human:
+        glpi_ticket_id = None
+        if should_escalate:
             fsm.escalate()
-            ticket_id = record_escalation_case(user_id, persona_name, history, user_message, router_payload)
+            glpi_ticket_id = record_escalation_case(
+                user_id, persona_name, history, user_message, router_payload
+            )
             response_content = FINAL_STATE_RESPONSES['FinalState_Escalated']
-            if ticket_id:
-                response_content += f" Reference ticket #{ticket_id}."
+            if glpi_ticket_id:
+                response_content += f" Reference ticket #{glpi_ticket_id}."
         elif router_payload and router_payload.get("decision") == "auto_resolved" and router_payload.get("resolution_proposal"):
             fsm.mark_resolved()
             response_content = "Here's what typically fixes this scenario:\n" + router_payload["resolution_proposal"]
@@ -896,8 +1021,8 @@ def chat_handler():
         payload = {"message": response_content, "fsm_state": fsm.state}
         if router_payload:
             payload["router"] = router_payload
-        if needs_supervisor or requires_human:
-            payload["glpi_ticket_id"] = ticket_id
+        if glpi_ticket_id:
+            payload["glpi_ticket_id"] = glpi_ticket_id
         return jsonify(payload), 200
 
     except Exception as e:

@@ -228,9 +228,13 @@ GLPI_APP_TOKEN=<application token>
 GLPI_API_TOKEN=<user token>
 DEFAULT_SUPPORT_PERSONA=ol_technical_and_diagnostics   # optional override
 GLPI_SYNC_INTERVAL_SECONDS=1800                        # optional
+KNOWLEDGE_AUTO_APPROVE=true                            # set false to require manual sign-off
 ```
 
 A background worker authenticates with GLPI, fetches recently closed/solved tickets, stores raw payloads under `glpi_tickets`, and runs the resolution extractor. Each structured resolution lands in `glpi_resolutions` with embeddings, root cause, entities, and confidence. The `/health` endpoint includes GLPI status, so dashboards can alarm if sync fails.
+
+Tickets that Obvix Lake escalates into GLPI are tracked by id; as soon as those GLPI tickets show a solved/closed status, the sync loop grabs them immediately (even if their closed dates fall outside the usual `GLPI_SYNC_INTERVAL_SECONDS` window) and pushes them through the same knowledge pipeline.
+When a ticket originated from a specific persona (for example `ol_airtel`), the pipeline stores the resulting knowledge only under that persona’s Mongo collection, so other personas never see or reuse the fix by accident.
 
 Additionally, whenever the router flags `needs_supervisor`/`requires_human`, `/chat` automatically creates a GLPI ticket containing the full conversation transcript plus router metadata and stores the generated ticket id in Mongo (`support_escalations`).
 
@@ -239,10 +243,13 @@ Additionally, whenever the router flags `needs_supervisor`/`requires_human`, `/c
 Every processed resolution is enqueued in `knowledge_pipeline_queue`. The pipeline:
 
 1. Drafts an article (title, summary, steps, tags) via GPT.
-2. Simulates lead/SMe approvals (timestamps recorded) and deduplicates against existing KB embeddings.
-3. Publishes approved content into:
+2. Stores the final chunks directly inside the persona’s MongoDB collection (`doc_type="knowledge"`) with two extra fields: `auto_generated=true` and `approved` (`auto` vs `manual`).
+3. Applies approvals automatically when `KNOWLEDGE_AUTO_APPROVE=true`; set it to `false` to hold drafts in `awaiting_approval` until a reviewer signs off.
+4. Publishes approved content into:
    * `knowledge_articles` (audit record, article embedding).
    * Persona MongoDB collections (`persona_<slug>`) as `doc_type="knowledge"` chunks tagged with `source="glpi_pipeline"`.
+
+Manual reviews happen over the API: `GET /knowledge/queue?status=awaiting_approval` lists drafts, and `POST /knowledge/queue/<id>/approve` (body `{ "reviewer": "alice" }`) publishes the article, marks the knowledge chunks as `approved=manual`, and timestamps the approval.
 
 This makes new fixes searchable immediately alongside Google Drive docs and powers `/tickets/route` auto-resolutions. Configure `KNOWLEDGE_PIPELINE_INTERVAL_SECONDS` to tune how often drafts are processed.
 

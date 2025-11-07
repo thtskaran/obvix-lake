@@ -27,6 +27,7 @@ class KnowledgePipeline:
         embedding_fn,
         queue_collection: str = "knowledge_pipeline_queue",
         articles_collection: str = "knowledge_articles",
+        auto_approve: bool = True,
     ) -> None:
         self.db = db
         self.persona_prefix = persona_prefix
@@ -35,6 +36,7 @@ class KnowledgePipeline:
         self._embedding_fn = embedding_fn
         self.queue_collection = queue_collection
         self.articles_collection = articles_collection
+        self.auto_approve = auto_approve
 
     # ------------------------------------------------------------------
     def enqueue_resolution(self, resolution_doc: Dict[str, Any], persona: Optional[str] = None) -> None:
@@ -71,10 +73,16 @@ class KnowledgePipeline:
                 {"$set": {"status": "error", "error": "draft_failed", "updated_at": datetime.now(timezone.utc)}},
             )
             return False
-        self.db[self.queue_collection].update_one(
-            {"_id": doc["_id"]},
-            {"$set": {"status": "lead_review", "draft": draft, "updated_at": datetime.now(timezone.utc)}},
-        )
+        base_update: Dict[str, Any] = {
+            "draft": draft,
+            "status": "lead_review" if self.auto_approve else "awaiting_approval",
+            "updated_at": datetime.now(timezone.utc),
+        }
+        self.db[self.queue_collection].update_one({"_id": doc["_id"]}, {"$set": base_update})
+
+        if not self.auto_approve:
+            return True
+
         # Automated approvals for prototype: mark as reviewed immediately
         now = datetime.now(timezone.utc)
         self.db[self.queue_collection].update_one(
@@ -85,10 +93,11 @@ class KnowledgePipeline:
                     "lead_reviewed_at": now,
                     "sme_reviewed_at": now,
                     "updated_at": now,
+                    "approval_mode": "auto",
                 }
             },
         )
-        publish_result = self._publish_article(persona, draft, resolution)
+        publish_result = self._publish_article(persona, draft, resolution, approval_mode="auto")
         status = "published" if publish_result else "error"
         self.db[self.queue_collection].update_one(
             {"_id": doc["_id"]},
@@ -96,6 +105,38 @@ class KnowledgePipeline:
         )
         return bool(publish_result)
 
+    # ------------------------------------------------------------------
+    def approve_queue_item(self, queue_id, reviewer: str = "manual") -> Dict[str, Any]:
+        doc = self.db[self.queue_collection].find_one({"_id": queue_id})
+        if not doc:
+            raise ValueError("Queue item not found")
+        if doc.get("status") not in {"awaiting_approval", "requeued"}:
+            raise ValueError("Queue item is not awaiting approval")
+        persona = doc.get("persona") or self.default_persona
+        resolution = doc.get("resolution", {})
+        draft = doc.get("draft") or self._draft_article(resolution)
+        if not draft:
+            raise ValueError("Draft missing for queue item")
+        publish_result = self._publish_article(persona, draft, resolution, approval_mode="manual")
+        now = datetime.now(timezone.utc)
+        status = "published" if publish_result else "error"
+        self.db[self.queue_collection].update_one(
+            {"_id": doc["_id"]},
+            {
+                "$set": {
+                    "status": status,
+                    "published_article_id": publish_result,
+                    "lead_reviewed_at": now,
+                    "sme_reviewed_at": now,
+                    "updated_at": now,
+                    "approval_mode": "manual",
+                    "approved_by": reviewer,
+                }
+            },
+        )
+        return {"status": status, "article_id": publish_result}
+
+    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     def _draft_article(self, resolution: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not resolution:
@@ -155,7 +196,13 @@ class KnowledgePipeline:
             chunks.append("\n\n".join(current))
         return chunks or [text]
 
-    def _publish_article(self, persona: str, article: Dict[str, Any], resolution: Dict[str, Any]) -> Optional[str]:
+    def _publish_article(
+        self,
+        persona: str,
+        article: Dict[str, Any],
+        resolution: Dict[str, Any],
+        approval_mode: str,
+    ) -> Optional[str]:
         text = article.get("full_text") or ""
         if not text:
             return None
@@ -172,6 +219,7 @@ class KnowledgePipeline:
         embeddings = self._embedding_fn(chunks)
         persona_collection = self.db[f"{self.persona_prefix}{persona}"]
         chunk_records = []
+        approved_stamp = datetime.now(timezone.utc)
         for idx, chunk in enumerate(chunks):
             record = {
                 "doc_type": "knowledge",
@@ -181,6 +229,9 @@ class KnowledgePipeline:
                 "ticket_id": resolution.get("ticket_id"),
                 "chunk_index": idx,
                 "created_at": datetime.now(timezone.utc),
+                "auto_generated": True,
+                "approved": approval_mode,
+                "approved_at": approved_stamp,
             }
             persona_collection.update_one(
                 {"ticket_id": resolution.get("ticket_id"), "chunk_index": idx, "source": "glpi_pipeline"},
@@ -198,6 +249,8 @@ class KnowledgePipeline:
             "article_embedding": article_embedding,
             "source_ticket_id": resolution.get("ticket_id"),
             "published_at": datetime.now(timezone.utc),
+            "auto_generated": True,
+            "approved": approval_mode,
         }
         result = self.db[self.articles_collection].insert_one(article_doc)
         return str(result.inserted_id)
