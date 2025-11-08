@@ -39,7 +39,7 @@ export const AppProviders: React.FC<AppProvidersProps> = ({ children }) => {
 
     try {
       localStorage.setItem('theme', theme);
-    } catch (e) {
+    } catch {
       /* ignore storage errors */
     }
   }, [theme]);

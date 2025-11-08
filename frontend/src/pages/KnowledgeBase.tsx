@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 
-export const KnowledgeBase: React.FC = () => {
+export const KnowledgeBase = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [selectedItems, setSelectedItems] = useState<Set<number>>(new Set());
   const [selectAll, setSelectAll] = useState(false);
@@ -19,15 +19,22 @@ export const KnowledgeBase: React.FC = () => {
 
   const handleSelectItem = (id: number) => {
     const next = new Set(selectedItems);
-    next.has(id) ? next.delete(id) : next.add(id);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
     setSelectedItems(next);
     setSelectAll(next.size === articles.length);
   };
 
   const handleSelectAll = () => {
-    if (selectAll) setSelectedItems(new Set());
-    else setSelectedItems(new Set(articles.map(a => a.id)));
-    setSelectAll(!selectAll);
+    if (selectAll) {
+      setSelectedItems(new Set());
+    } else {
+      setSelectedItems(new Set(articles.map((article) => article.id)));
+    }
+    setSelectAll((prev) => !prev);
   };
 
   const SkeletonRow = () => (

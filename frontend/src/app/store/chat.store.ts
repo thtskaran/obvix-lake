@@ -8,7 +8,7 @@ interface ChatState {
   // TODO: Add actions for sending messages, loading chat history, etc.
 }
 
-export const useChatStore = create<ChatState>((set) => ({
+export const useChatStore = create<ChatState>(() => ({
   messages: [],
   isLoading: false,
   currentTicketId: null,

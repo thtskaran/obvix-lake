@@ -1,436 +1,489 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { fetchAnalyticsTrends, fetchMetrics } from "../app/api/endpoints";
+import type { MetricsSnapshot, TrendCluster, TrendDirection } from "../types/api";
+
+const numberFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+const dateFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+const formatPercent = (value: number | null | undefined, fallback = "—") => {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return fallback;
+  }
+  return `${(value * 100).toFixed(1)}%`;
+};
+
+const formatRatio = (value: number | null | undefined, fallback = "—") => {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return fallback;
+  }
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return `${value.toFixed(2)}×`;
+};
+
+const formatNumber = (value: number | null | undefined, fallback = "—") => {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return fallback;
+  }
+  return numberFormatter.format(Math.round(value));
+};
+
+const formatCsat = (value: number | null | undefined, fallback = "—") => {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return fallback;
+  }
+  return `${value.toFixed(2)} / 5`;
+};
+
+const formatHours = (value: number | null | undefined, fallback = "—") => {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return fallback;
+  }
+  const totalMinutes = Math.max(0, Math.round(value * 60));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (!hours && !minutes) {
+    return "<1m";
+  }
+  const parts: string[] = [];
+  if (hours) parts.push(`${hours}h`);
+  if (minutes) parts.push(`${minutes}m`);
+  return parts.join(" ");
+};
+
+const formatTimestamp = (value: string | undefined) => {
+  if (!value) {
+    return "—";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "—";
+  }
+  return dateFormatter.format(parsed);
+};
+
+const trendStyles: Record<TrendDirection | "default", { label: string; badge: string; dot: string }> = {
+  emerging: {
+    label: "Emerging",
+    badge: "bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-200",
+    dot: "bg-orange-500",
+  },
+  growing: {
+    label: "Growing",
+    badge: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-200",
+    dot: "bg-emerald-500",
+  },
+  declining: {
+    label: "Declining",
+    badge: "bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-200",
+    dot: "bg-red-500",
+  },
+  stable: {
+    label: "Stable",
+    badge: "bg-slate-100 text-slate-700 dark:bg-slate-700/30 dark:text-slate-200",
+    dot: "bg-slate-400",
+  },
+  default: {
+    label: "Unknown",
+    badge: "bg-slate-100 text-slate-700 dark:bg-slate-700/30 dark:text-slate-200",
+    dot: "bg-slate-400",
+  },
+};
+
+const getTrendVisual = (trend?: TrendDirection) => trendStyles[trend ?? "default"];
+
+const LoadingSkeleton: React.FC = () => (
+  <div className="space-y-8">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 lg:gap-6">
+      {Array.from({ length: 4 }).map((_, index) => (
+        <div
+          key={index}
+          className="h-36 rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/70 dark:bg-slate-800/40 animate-pulse"
+        />
+      ))}
+    </div>
+    <div className="h-64 rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/70 dark:bg-slate-800/40 animate-pulse" />
+  </div>
+);
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Unexpected error";
+};
 
 export const Dashboard: React.FC = () => {
+  const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
+  const [clusters, setClusters] = useState<TrendCluster[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshIndex, setRefreshIndex] = useState(0);
 
   useEffect(() => {
-    // Simulate loading time
-    const timer = setTimeout(() => {
-      setIsLoading(false);
-    }, 2000);
+    const controller = new AbortController();
+    let isActive = true;
 
-    return () => clearTimeout(timer);
+    setIsLoading(true);
+    setError(null);
+
+    Promise.allSettled([
+      fetchMetrics(controller.signal),
+      fetchAnalyticsTrends(controller.signal),
+    ])
+      .then(([metricsResult, trendsResult]) => {
+        if (!isActive) {
+          return;
+        }
+
+        const errors: string[] = [];
+
+        if (metricsResult.status === "fulfilled") {
+          setMetrics(metricsResult.value);
+        } else if (!controller.signal.aborted) {
+          errors.push(`Metrics: ${getErrorMessage(metricsResult.reason)}`);
+        }
+
+        if (trendsResult.status === "fulfilled") {
+          setClusters(trendsResult.value.clusters);
+        } else if (!controller.signal.aborted) {
+          errors.push(`Trends: ${getErrorMessage(trendsResult.reason)}`);
+        }
+
+        setError(errors.length ? errors.join(" · ") : null);
+      })
+      .finally(() => {
+        if (isActive) {
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      isActive = false;
+      controller.abort();
+    };
+  }, [refreshIndex]);
+
+  const handleRefresh = useCallback(() => {
+    setRefreshIndex((index) => index + 1);
   }, []);
 
-  // Skeleton Components
-  const MetricCardSkeleton = () => (
-    <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 animate-pulse">
-      <div className="flex items-center justify-between mb-3 lg:mb-4">
-        <div className="h-3 bg-[#F5ECE5] dark:bg-slate-700 rounded w-24"></div>
-        <div className="w-2 h-2 bg-[#F5ECE5] dark:bg-slate-700 rounded-full"></div>
-      </div>
-      <div className="h-8 sm:h-10 lg:h-12 bg-[#F5ECE5] dark:bg-slate-700 rounded w-20 mb-2"></div>
-      <div className="flex items-center gap-2">
-        <div className="h-6 bg-[#F5ECE5] dark:bg-slate-700 rounded w-16"></div>
-        <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded w-20"></div>
-      </div>
-    </div>
-  );
+  const assists = metrics?.assistive ?? null;
+  const escalations = metrics?.human_agent ?? null;
+  const assistiveRate = metrics?.assistive_rate ?? null;
+  const escalationRate =
+    assistiveRate === null || assistiveRate === undefined
+      ? null
+      : Math.max(0, 1 - assistiveRate);
 
-  const ChatItemSkeleton = () => (
-    <div className="p-4 sm:p-5 lg:p-6 animate-pulse border-l-4 border-[#F5ECE5] dark:border-slate-600">
-      <div className="flex items-start gap-3 lg:gap-4">
-        <div className="w-3 h-3 lg:w-4 lg:h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded-full flex-shrink-0 mt-0.5"></div>
-        <div className="flex-1 min-w-0">
-          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 mb-1">
-                <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded w-24"></div>
-                <div className="h-3 bg-[#F5ECE5] dark:bg-slate-700 rounded w-16"></div>
-              </div>
-              <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded w-full mb-1"></div>
-              <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded w-3/4"></div>
-            </div>
-            <div className="text-left sm:text-right flex-shrink-0">
-              <div className="h-6 bg-[#F5ECE5] dark:bg-slate-700 rounded w-20 mb-1"></div>
-              <div className="h-3 bg-[#F5ECE5] dark:bg-slate-700 rounded w-12"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+  const metricCards = useMemo(() => {
+    if (!metrics) {
+      return [];
+    }
 
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
-        {/* Background Pattern */}
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(232,159,136,0.03),transparent)] dark:bg-[radial-gradient(circle_at_20%_40%,rgba(120,119,198,0.1),transparent)] opacity-50" />
-        
-        <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 p-4 sm:p-6 lg:p-8">
-          {/* Header Skeleton */}
-          <div className="flex flex-col lg:flex-row lg:justify-between gap-4 lg:gap-6 mb-6 lg:mb-8 animate-pulse">
-            <div className="space-y-2">
-              <div className="h-8 sm:h-10 lg:h-12 bg-[#F5ECE5] dark:bg-slate-700 rounded w-64 lg:w-80"></div>
-              <div className="h-4 lg:h-5 bg-[#F5ECE5] dark:bg-slate-700 rounded w-80 lg:w-96"></div>
-            </div>
-            
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 lg:gap-4">
-              <div className="h-12 bg-[#F5ECE5] dark:bg-slate-700 rounded-xl w-full sm:w-60"></div>
-            </div>
-          </div>
+    return [
+      {
+        id: "assistive",
+        title: "Assistive Success",
+        value: formatPercent(metrics.assistive_rate),
+        description: `${formatNumber(metrics.assistive, "0")} handled automatically · ${formatNumber(
+          metrics.human_agent,
+          "0",
+        )} escalated`,
+        accent: "from-emerald-400/15 via-emerald-400/10 to-emerald-500/5",
+        indicator: "bg-emerald-400",
+      },
+      {
+        id: "csat",
+        title: "Average CSAT",
+        value: formatCsat(metrics.avg_csat),
+        description: "Customer feedback (last 30 days)",
+        accent: "from-blue-400/15 via-blue-400/10 to-blue-500/5",
+        indicator: "bg-blue-400",
+      },
+      {
+        id: "resolution_time",
+        title: "Avg. Resolution Time",
+        value: formatHours(metrics.avg_resolution_hours),
+        description: "Closed GLPI tickets",
+        accent: "from-amber-400/20 via-amber-400/10 to-amber-500/5",
+        indicator: "bg-amber-400",
+      },
+      {
+        id: "knowledge",
+        title: "Knowledge Growth",
+        value: formatRatio(metrics.knowledge_growth_ratio),
+        description: "Auto-published vs manual articles",
+        accent: "from-purple-400/20 via-purple-400/10 to-purple-500/5",
+        indicator: "bg-purple-400",
+      },
+    ];
+  }, [metrics]);
 
-          {/* Metrics Grid Skeleton */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 gap-4 lg:gap-6 mb-6 lg:mb-8">
-            {[...Array(6)].map((_, i) => (
-              <MetricCardSkeleton key={i} />
-            ))}
-          </div>
+  const topClusters = useMemo(() => clusters.slice(0, 5), [clusters]);
 
-          {/* Chat Feed Skeleton */}
-          <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl overflow-hidden shadow-lg">
-            <div className="p-4 sm:p-5 lg:p-6 border-b border-[#F5ECE5] dark:border-slate-600/30 animate-pulse">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 lg:gap-4 mb-4 lg:mb-6">
-                <div className="min-w-0">
-                  <div className="h-6 sm:h-8 lg:h-9 bg-[#F5ECE5] dark:bg-slate-700 rounded w-48 mb-2"></div>
-                  <div className="h-4 lg:h-5 bg-[#F5ECE5] dark:bg-slate-700 rounded w-80"></div>
-                </div>
-                <div className="h-8 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-24 flex-shrink-0"></div>
-              </div>
+  const knowledgeTags = useMemo(() => {
+    const tagSet = new Set<string>();
+    clusters.forEach((cluster) => {
+      cluster.top_entities.forEach((entity) => {
+        if (entity) {
+          tagSet.add(entity);
+        }
+      });
+    });
+    return Array.from(tagSet).slice(0, 8);
+  }, [clusters]);
 
-              {/* Filter Tabs Skeleton */}
-              <div className="flex gap-2 overflow-x-auto pb-2">
-                {[...Array(4)].map((_, i) => (
-                  <div key={i} className="h-8 bg-[#F5ECE5] dark:bg-slate-700 rounded-xl w-16 flex-shrink-0"></div>
-                ))}
-              </div>
-            </div>
+  const lastUpdated = useMemo(() => {
+    const timestamps: string[] = [];
+    if (metrics?.timestamp) {
+      timestamps.push(metrics.timestamp);
+    }
+    clusters.forEach((cluster) => {
+      if (cluster.last_updated) {
+        timestamps.push(cluster.last_updated);
+      }
+    });
+    if (!timestamps.length) {
+      return undefined;
+    }
+    return timestamps
+      .slice()
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+  }, [metrics, clusters]);
 
-            {/* Chat Items Skeleton */}
-            <div className="divide-y divide-[#F5ECE5]/50 dark:divide-slate-600/20">
-              {[...Array(5)].map((_, i) => (
-                <ChatItemSkeleton key={i} />
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const showSkeleton = isLoading && !metrics && clusters.length === 0;
 
   return (
     <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
-      {/* Background Pattern */}
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(232,159,136,0.03),transparent)] dark:bg-[radial-gradient(circle_at_20%_40%,rgba(120,119,198,0.1),transparent)] opacity-50" />
-      
-      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 p-4 sm:p-6 lg:p-8">
-        {/* Header Section */}
-        <div className="flex flex-col lg:flex-row lg:justify-between gap-4 lg:gap-6 mb-6 lg:mb-8">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(232,159,136,0.05),transparent)] dark:bg-[radial-gradient(circle_at_20%_40%,rgba(120,119,198,0.12),transparent)] opacity-60" />
+      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-10">
+        <header className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between mb-8">
           <div className="space-y-2">
-            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-semibold text-[#333333] dark:text-white tracking-tight">
-              Real-time Monitoring
+            <h1 className="text-3xl sm:text-4xl font-semibold text-[#333333] dark:text-white tracking-tight">
+              Operations Overview
             </h1>
-            <p className="text-[#6b5f57] dark:text-slate-400 text-base lg:text-lg">
-              Live insights from your AI customer service operations
+            <p className="text-[#6b5f57] dark:text-slate-400 text-base lg:text-lg max-w-2xl">
+              Live performance of the hybrid agent, ticket escalations, and knowledge pipeline—built straight from the
+              Flask backend metrics.
+            </p>
+            <p className="text-xs sm:text-sm text-[#9c8f86] dark:text-slate-500">
+              Last synced: {formatTimestamp(lastUpdated)}
             </p>
           </div>
-          
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 lg:gap-4">
-            <div className="flex items-center bg-white dark:bg-slate-800/60 backdrop-blur border border-[#F5ECE5] dark:border-slate-600/40 rounded-xl p-1 w-full sm:w-auto">
-              <input
-                className="bg-transparent text-[#333333] dark:text-white text-sm px-2 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#E89F88]/50 dark:focus:ring-blue-500/50 flex-1 sm:flex-none sm:w-28"
-                type="date"
-                defaultValue="2023-10-26"
-              />
-              <div className="w-px h-6 bg-[#F5ECE5] dark:bg-slate-600 mx-2" />
-              <input
-                className="bg-transparent text-[#333333] dark:text-white text-sm px-2 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#E89F88]/50 dark:focus:ring-blue-500/50 flex-1 sm:flex-none sm:w-28"
-                type="date"
-                defaultValue="2023-10-27"
-              />
-            </div>
+          <div className="flex items-center gap-3">
+            {isLoading && (
+              <span className="text-xs font-medium text-[#E89F88] dark:text-blue-300 bg-[#E89F88]/10 dark:bg-blue-500/20 px-3 py-1 rounded-lg">
+                Refreshing…
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={isLoading}
+              className="inline-flex items-center gap-2 rounded-xl border border-[#F5ECE5] dark:border-slate-700 bg-white/80 dark:bg-slate-800/60 px-4 py-2 text-sm font-medium text-[#333333] dark:text-slate-100 shadow-sm hover:shadow transition disabled:opacity-60"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.5}
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.992 0l3.536 3.536A8.25 8.25 0 0019.5 12.75"
+                />
+              </svg>
+              Refresh data
+            </button>
           </div>
-        </div>
+        </header>
 
-        {/* Metrics Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 gap-4 lg:gap-6 mb-6 lg:mb-8">
-          {/* Resolution Rate */}
-          <div className="group relative bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:border-[#8CC63F]/30 dark:hover:border-green-500/30 transition-all duration-300 hover:shadow-lg">
-            <div className="absolute inset-0 bg-gradient-to-br from-[#8CC63F]/5 dark:from-green-500/5 to-transparent rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-3 lg:mb-4">
-                <p className="text-[#6b5f57] dark:text-slate-400 font-medium text-xs lg:text-sm uppercase tracking-wider">Resolution Rate</p>
-                <div className="w-2 h-2 bg-[#8CC63F] dark:bg-green-400 rounded-full animate-pulse" />
-              </div>
-              <p className="text-[#333333] dark:text-white text-2xl sm:text-3xl lg:text-4xl font-bold mb-2">82%</p>
-              <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex items-center text-[#6A9A2E] dark:text-green-400 text-xs lg:text-sm font-semibold bg-[#8CC63F]/10 dark:bg-green-500/10 px-2 py-1 rounded-lg">
-                  <svg className="w-3 h-3 lg:w-4 lg:h-4 mr-1 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                  </svg>
-                  +2.1%
-                </div>
-                <span className="text-[#6b5f57] dark:text-slate-400 text-xs lg:text-sm">vs last week</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Automation Rate */}
-          <div className="group relative bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:border-[#5A9FD4]/30 dark:hover:border-blue-500/30 transition-all duration-300 hover:shadow-lg">
-            <div className="absolute inset-0 bg-gradient-to-br from-[#5A9FD4]/5 dark:from-blue-500/5 to-transparent rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-3 lg:mb-4">
-                <p className="text-[#6b5f57] dark:text-slate-400 font-medium text-xs lg:text-sm uppercase tracking-wider">Automation Rate</p>
-                <div className="w-2 h-2 bg-[#5A9FD4] dark:bg-blue-400 rounded-full animate-pulse" />
-              </div>
-              <p className="text-[#333333] dark:text-white text-2xl sm:text-3xl lg:text-4xl font-bold mb-2">95%</p>
-              <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex items-center text-[#4A8BC2] dark:text-blue-400 text-xs lg:text-sm font-semibold bg-[#5A9FD4]/10 dark:bg-blue-500/10 px-2 py-1 rounded-lg">
-                  <svg className="w-3 h-3 lg:w-4 lg:h-4 mr-1 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                  </svg>
-                  +1.5%
-                </div>
-                <span className="text-[#6b5f57] dark:text-slate-400 text-xs lg:text-sm">vs last week</span>
+        {error && (
+          <div className="mb-8 rounded-2xl border border-red-200 dark:border-red-500/40 bg-red-50/70 dark:bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-200">
+            <div className="flex items-start gap-3">
+              <svg className="h-4 w-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div>
+                <p className="font-medium">Some dashboard data is temporarily unavailable.</p>
+                <p className="mt-1 leading-relaxed">{error}</p>
               </div>
             </div>
           </div>
+        )}
 
-          {/* Handle Time */}
-          <div className="group relative bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:border-[#F5A623]/30 dark:hover:border-amber-500/30 transition-all duration-300 hover:shadow-lg sm:col-span-2 xl:col-span-1">
-            <div className="absolute inset-0 bg-gradient-to-br from-[#F5A623]/5 dark:from-amber-500/5 to-transparent rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-3 lg:mb-4">
-                <p className="text-[#6b5f57] dark:text-slate-400 font-medium text-xs lg:text-sm uppercase tracking-wider">Avg. Handle Time</p>
-                <div className="w-2 h-2 bg-[#F5A623] dark:bg-amber-400 rounded-full animate-pulse" />
-              </div>
-              <p className="text-[#333333] dark:text-white text-2xl sm:text-3xl lg:text-4xl font-bold mb-2">2.5 min</p>
-              <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex items-center text-[#6A9A2E] dark:text-emerald-400 text-xs lg:text-sm font-semibold bg-[#8CC63F]/10 dark:bg-emerald-500/10 px-2 py-1 rounded-lg">
-                  <svg className="w-3 h-3 lg:w-4 lg:h-4 mr-1 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M14.707 10.293a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 111.414-1.414L9 12.586V5a1 1 0 012 0v7.586l2.293-2.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                  </svg>
-                  -0.2 min
-                </div>
-                <span className="text-[#6b5f57] dark:text-slate-400 text-xs lg:text-sm">improvement</span>
-              </div>
-            </div>
-          </div>
-
-          {/* CSAT Score */}
-          <div className="group relative bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:border-[#9B59B6]/30 dark:hover:border-purple-500/30 transition-all duration-300 hover:shadow-lg">
-            <div className="absolute inset-0 bg-gradient-to-br from-[#9B59B6]/5 dark:from-purple-500/5 to-transparent rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-3 lg:mb-4">
-                <p className="text-[#6b5f57] dark:text-slate-400 font-medium text-xs lg:text-sm uppercase tracking-wider">CSAT Score</p>
-                <div className="flex gap-1">
-                  {[...Array(5)].map((_, i) => (
-                    <div key={i} className={`w-1.5 h-1.5 rounded-full ${i < 4 ? 'bg-[#F5A623] dark:bg-yellow-400' : 'bg-[#F5ECE5] dark:bg-slate-600'}`} />
-                  ))}
-                </div>
-              </div>
-              <p className="text-[#333333] dark:text-white text-2xl sm:text-3xl lg:text-4xl font-bold mb-2">4.8/5</p>
-              <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex items-center text-[#8E44AD] dark:text-purple-400 text-xs lg:text-sm font-semibold bg-[#9B59B6]/10 dark:bg-purple-500/10 px-2 py-1 rounded-lg">
-                  <svg className="w-3 h-3 lg:w-4 lg:h-4 mr-1 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                  </svg>
-                  +0.1
-                </div>
-                <span className="text-[#6b5f57] dark:text-slate-400 text-xs lg:text-sm">satisfaction up</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Escalation Rate */}
-          <div className="group relative bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:border-[#8CC63F]/30 dark:hover:border-emerald-500/30 transition-all duration-300 hover:shadow-lg">
-            <div className="absolute inset-0 bg-gradient-to-br from-[#8CC63F]/5 dark:from-emerald-500/5 to-transparent rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-3 lg:mb-4">
-                <p className="text-[#6b5f57] dark:text-slate-400 font-medium text-xs lg:text-sm uppercase tracking-wider">Escalation Rate</p>
-                <div className="w-2 h-2 bg-[#8CC63F] dark:bg-emerald-400 rounded-full animate-pulse" />
-              </div>
-              <p className="text-[#333333] dark:text-white text-2xl sm:text-3xl lg:text-4xl font-bold mb-2">5%</p>
-              <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex items-center text-[#6A9A2E] dark:text-emerald-400 text-xs lg:text-sm font-semibold bg-[#8CC63F]/10 dark:bg-emerald-500/10 px-2 py-1 rounded-lg">
-                  <svg className="w-3 h-3 lg:w-4 lg:h-4 mr-1 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M14.707 10.293a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 111.414-1.414L9 12.586V5a1 1 0 012 0v7.586l2.293-2.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                  </svg>
-                  -0.5%
-                </div>
-                <span className="text-[#6b5f57] dark:text-slate-400 text-xs lg:text-sm">fewer escalations</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Active Chats */}
-          <div className="group relative bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:border-[#E89F88]/30 dark:hover:border-orange-500/30 transition-all duration-300 hover:shadow-lg">
-            <div className="absolute inset-0 bg-gradient-to-br from-[#E89F88]/5 dark:from-orange-500/5 to-transparent rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-3 lg:mb-4">
-                <p className="text-[#6b5f57] dark:text-slate-400 font-medium text-xs lg:text-sm uppercase tracking-wider">Active Chats</p>
-                <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 bg-[#E89F88] dark:bg-orange-400 rounded-full animate-pulse" />
-                  <span className="text-xs text-[#E89F88] dark:text-orange-400 font-medium">LIVE</span>
-                </div>
-              </div>
-              <p className="text-[#333333] dark:text-white text-2xl sm:text-3xl lg:text-4xl font-bold mb-2">12</p>
-              <div className="flex items-center gap-2">
-                <span className="text-[#6b5f57] dark:text-slate-400 text-xs lg:text-sm">Active conversations</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Live Chat Feed */}
-        <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl overflow-hidden shadow-lg hover:shadow-xl transition-all duration-300">
-          <div className="p-4 sm:p-5 lg:p-6 border-b border-[#F5ECE5] dark:border-slate-600/30">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 lg:gap-4 mb-4 lg:mb-6">
-              <div className="min-w-0">
-                <h2 className="text-xl sm:text-2xl lg:text-3xl font-semibold text-[#333333] dark:text-white mb-2">Live Chat Feed</h2>
-                <p className="text-[#6b5f57] dark:text-slate-400 text-sm sm:text-base lg:text-lg">Monitor ongoing customer conversations in real-time</p>
-              </div>
-              <div className="flex items-center gap-2 bg-[#F5ECE5]/50 dark:bg-slate-700/30 px-3 py-2 rounded-lg flex-shrink-0">
-                <div className="w-2 h-2 bg-[#8CC63F] dark:bg-green-400 rounded-full animate-pulse" />
-                <span className="text-sm text-[#333333] dark:text-slate-300 font-medium">12 Active</span>
-              </div>
-            </div>
-
-            {/* Filter Tabs */}
-            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
-              <button className="flex-shrink-0 bg-[#E89F88] hover:bg-[#E89F88]/90 dark:bg-blue-600 dark:hover:bg-blue-700 text-white px-3 py-2 rounded-xl text-xs font-medium shadow-lg shadow-[#E89F88]/25 dark:shadow-blue-500/25 transition-all whitespace-nowrap">
-                All <span className="ml-1 bg-[#E89F88]/30 dark:bg-blue-400/30 px-1.5 py-0.5 rounded text-xs">12</span>
-              </button>
-              <button className="flex-shrink-0 bg-[#F5ECE5]/50 dark:bg-slate-700/50 hover:bg-[#F5ECE5] dark:hover:bg-slate-700 text-[#6b5f57] dark:text-slate-300 hover:text-[#333333] dark:hover:text-white px-3 py-2 rounded-xl text-xs font-medium transition-all duration-200 whitespace-nowrap">
-                Agent <span className="ml-1 bg-red-100 dark:bg-red-500/20 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded text-xs">2</span>
-              </button>
-              <button className="flex-shrink-0 bg-[#F5ECE5]/50 dark:bg-slate-700/50 hover:bg-[#F5ECE5] dark:hover:bg-slate-700 text-[#6b5f57] dark:text-slate-300 hover:text-[#333333] dark:hover:text-white px-3 py-2 rounded-xl text-xs font-medium transition-all duration-200 whitespace-nowrap">
-                AI <span className="ml-1 bg-blue-100 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 px-1.5 py-0.5 rounded text-xs">8</span>
-              </button>
-              <button className="flex-shrink-0 bg-[#F5ECE5]/50 dark:bg-slate-700/50 hover:bg-[#F5ECE5] dark:hover:bg-slate-700 text-[#6b5f57] dark:text-slate-300 hover:text-[#333333] dark:hover:text-white px-3 py-2 rounded-xl text-xs font-medium transition-all duration-200 whitespace-nowrap">
-                Resolved <span className="ml-1 bg-green-100 dark:bg-green-500/20 text-green-600 dark:text-green-400 px-1.5 py-0.5 rounded text-xs">2</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Chat List */}
-          <div className="divide-y divide-[#F5ECE5]/50 dark:divide-slate-600/20">
-            {/* High Priority Chat */}
-            <div className="group p-4 sm:p-5 lg:p-6 hover:bg-[#F5ECE5]/30 dark:hover:bg-slate-700/30 cursor-pointer transition-all duration-200 border-l-4 border-red-500/50">
-              <div className="flex items-start gap-3 lg:gap-4">
-                <div className="relative flex-shrink-0 mt-0.5">
-                  <div className="w-3 h-3 lg:w-4 lg:h-4 bg-red-500 rounded-full shadow-lg shadow-red-500/50" />
-                  <div className="absolute inset-0 bg-red-500 rounded-full animate-ping opacity-75" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <p className="font-semibold text-sm sm:text-base lg:text-lg text-[#333333] dark:text-white group-hover:text-[#E89F88] dark:group-hover:text-blue-400 transition-colors">John Doe</p>
-                        <span className="text-[#6b5f57] dark:text-slate-400 text-xs font-mono">#12345</span>
+        {showSkeleton ? (
+          <LoadingSkeleton />
+        ) : (
+          <div className="space-y-10">
+            {metricCards.length ? (
+              <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 lg:gap-6">
+                {metricCards.map((card) => (
+                  <article
+                    key={card.id}
+                    className="relative overflow-hidden rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 shadow-sm hover:shadow-lg transition group"
+                  >
+                    <div className={`absolute inset-0 bg-gradient-to-br ${card.accent} opacity-0 group-hover:opacity-100 transition-opacity duration-300`} />
+                    <div className="relative p-5 lg:p-6">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
+                          {card.title}
+                        </span>
+                        <span className={`h-2 w-2 rounded-full ${card.indicator} animate-pulse`} aria-hidden />
                       </div>
-                      <p className="text-[#6b5f57] dark:text-slate-300 text-sm sm:text-base leading-relaxed">My order is late, I can't find the delivery guy. Can you help?</p>
+                      <p className="mt-3 text-3xl font-semibold text-[#333333] dark:text-white">{card.value}</p>
+                      <p className="mt-3 text-sm text-[#6b5f57] dark:text-slate-400 leading-relaxed">
+                        {card.description}
+                      </p>
                     </div>
-                    <div className="text-left sm:text-right flex-shrink-0">
-                      <div className="bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/20 border text-xs font-semibold px-2 py-1 rounded-full shadow-sm">
-                        Needs Agent
-                      </div>
-                      <span className="text-[#6b5f57] dark:text-slate-400 text-xs mt-1 block">2m ago</span>
-                    </div>
+                  </article>
+                ))}
+              </section>
+            ) : (
+              <p className="text-sm text-[#6b5f57] dark:text-slate-400">Metrics have not been generated yet.</p>
+            )}
+
+            <section className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-semibold text-[#333333] dark:text-white">Trending ticket themes</h2>
+                  <p className="text-sm text-[#6b5f57] dark:text-slate-400">
+                    Source: `/analytics/trends` clusters derived from GLPI resolution embeddings
+                  </p>
+                </div>
+                <span className="inline-flex items-center gap-2 rounded-full border border-[#F5ECE5] dark:border-slate-700 bg-white/70 dark:bg-slate-800/40 px-3 py-1 text-xs text-[#6b5f57] dark:text-slate-300">
+                  <span className="h-2 w-2 rounded-full bg-[#E89F88] dark:bg-blue-400 animate-pulse" aria-hidden />
+                  Monitoring {formatNumber(clusters.length, "0")} clusters
+                </span>
+              </div>
+
+              {topClusters.length ? (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {topClusters.map((cluster) => {
+                    const visuals = getTrendVisual(cluster.trend);
+                    return (
+                      <article
+                        key={`${cluster.cluster_id}-${cluster.label}`}
+                        className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm hover:shadow-md transition"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <h3 className="text-lg font-semibold text-[#333333] dark:text-white">
+                              {cluster.label || `Cluster #${cluster.cluster_id}`}
+                            </h3>
+                            <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
+                              {formatNumber(cluster.size, "0")} tickets · Updated {formatTimestamp(cluster.last_updated)}
+                            </p>
+                          </div>
+                          <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium ${visuals.badge}`}>
+                            <span className={`h-2 w-2 rounded-full ${visuals.dot}`} aria-hidden />
+                            {visuals.label}
+                          </span>
+                        </div>
+                        {cluster.top_entities.length > 0 && (
+                          <div className="mt-4 flex flex-wrap gap-2">
+                            {cluster.top_entities.slice(0, 6).map((entity) => (
+                              <span
+                                key={entity}
+                                className="rounded-full bg-[#F5ECE5]/60 dark:bg-slate-700/50 px-3 py-1 text-xs text-[#6b5f57] dark:text-slate-200"
+                              >
+                                {entity}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {cluster.ticket_ids.length > 0 && (
+                          <p className="mt-4 text-xs text-[#9c8f86] dark:text-slate-500">
+                            Sample tickets: {cluster.ticket_ids.slice(0, 3).join(", ")}
+                            {cluster.ticket_ids.length > 3 ? "…" : ""}
+                          </p>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-[#F5ECE5] dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-8 text-center text-sm text-[#6b5f57] dark:text-slate-400">
+                  No trend clusters available yet. Once GLPI resolutions are processed, emerging topics will appear here automatically.
+                </div>
+              )}
+            </section>
+
+            <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
+              <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
+                <h3 className="text-lg font-semibold text-[#333333] dark:text-white">Assistive throughput</h3>
+                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
+                  Balance between autonomous resolutions and escalations over the last 30 days.
+                </p>
+                <dl className="mt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Assistive handled</dt>
+                    <dd className="text-base font-semibold text-[#333333] dark:text-white">
+                      {formatNumber(assists, "0")}
+                    </dd>
                   </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Resolved Chat */}
-            <div className="group p-4 sm:p-5 lg:p-6 hover:bg-[#F5ECE5]/30 dark:hover:bg-slate-700/30 cursor-pointer transition-all duration-200 border-l-4 border-green-500/30">
-              <div className="flex items-start gap-3 lg:gap-4">
-                <div className="w-3 h-3 lg:w-4 lg:h-4 bg-green-500 rounded-full shadow-lg shadow-green-500/30 flex-shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <p className="font-semibold text-sm sm:text-base lg:text-lg text-[#333333] dark:text-white group-hover:text-[#E89F88] dark:group-hover:text-blue-400 transition-colors">Jane Smith</p>
-                        <span className="text-[#6b5f57] dark:text-slate-400 text-xs font-mono">#12346</span>
-                      </div>
-                      <p className="text-[#6b5f57] dark:text-slate-300 text-sm sm:text-base leading-relaxed">Thank you for the quick help!</p>
-                    </div>
-                    <div className="text-left sm:text-right flex-shrink-0">
-                      <div className="bg-green-50 dark:bg-green-500/10 text-green-700 dark:text-green-300 border-green-200 dark:border-green-500/20 border text-xs font-semibold px-2 py-1 rounded-full shadow-sm">
-                        Resolved
-                      </div>
-                      <span className="text-[#6b5f57] dark:text-slate-400 text-xs mt-1 block">5m ago</span>
-                    </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Escalated to human</dt>
+                    <dd className="text-base font-semibold text-[#333333] dark:text-white">
+                      {formatNumber(escalations, "0")}
+                    </dd>
                   </div>
-                </div>
-              </div>
-            </div>
+                </dl>
+              </article>
 
-            {/* AI Handling Chats */}
-            <div className="group p-4 sm:p-5 lg:p-6 hover:bg-[#F5ECE5]/30 dark:hover:bg-slate-700/30 cursor-pointer transition-all duration-200 border-l-4 border-blue-500/30">
-              <div className="flex items-start gap-3 lg:gap-4">
-                <div className="w-3 h-3 lg:w-4 lg:h-4 bg-blue-500 rounded-full shadow-lg shadow-blue-500/30 animate-pulse flex-shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <p className="font-semibold text-sm sm:text-base lg:text-lg text-[#333333] dark:text-white group-hover:text-[#E89F88] dark:group-hover:text-blue-400 transition-colors">Sam Wilson</p>
-                        <span className="text-[#6b5f57] dark:text-slate-400 text-xs font-mono">#12347</span>
-                      </div>
-                      <p className="text-[#6b5f57] dark:text-slate-300 text-sm sm:text-base leading-relaxed">I want to change my delivery address.</p>
-                    </div>
-                    <div className="text-left sm:text-right flex-shrink-0">
-                      <div className="bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-500/20 border text-xs font-semibold px-2 py-1 rounded-full shadow-sm">
-                        AI Handling
-                      </div>
-                      <span className="text-[#6b5f57] dark:text-slate-400 text-xs mt-1 block">8m ago</span>
-                    </div>
+              <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
+                <h3 className="text-lg font-semibold text-[#333333] dark:text-white">Resolution confidence</h3>
+                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
+                  Confidence indicators derived from `/metrics` assistive rate.
+                </p>
+                <dl className="mt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Assistive success</dt>
+                    <dd className="text-base font-semibold text-[#333333] dark:text-white">
+                      {formatPercent(assistiveRate)}
+                    </dd>
                   </div>
-                </div>
-              </div>
-            </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Escalation rate</dt>
+                    <dd className="text-base font-semibold text-[#333333] dark:text-white">
+                      {formatPercent(escalationRate)}
+                    </dd>
+                  </div>
+                </dl>
+              </article>
 
-            <div className="group p-4 sm:p-5 lg:p-6 hover:bg-[#F5ECE5]/30 dark:hover:bg-slate-700/30 cursor-pointer transition-all duration-200 border-l-4 border-blue-500/30">
-              <div className="flex items-start gap-3 lg:gap-4">
-                <div className="w-3 h-3 lg:w-4 lg:h-4 bg-blue-500 rounded-full shadow-lg shadow-blue-500/30 animate-pulse flex-shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <p className="font-semibold text-sm sm:text-base lg:text-lg text-[#333333] dark:text-white group-hover:text-[#E89F88] dark:group-hover:text-blue-400 transition-colors">Emily Carter</p>
-                        <span className="text-[#6b5f57] dark:text-slate-400 text-xs font-mono">#12348</span>
-                      </div>
-                      <p className="text-[#6b5f57] dark:text-slate-300 text-sm sm:text-base leading-relaxed">What's the status of my refund?</p>
-                    </div>
-                    <div className="text-left sm:text-right flex-shrink-0">
-                      <div className="bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-500/20 border text-xs font-semibold px-2 py-1 rounded-full shadow-sm">
-                        AI Handling
-                      </div>
-                      <span className="text-[#6b5f57] dark:text-slate-400 text-xs mt-1 block">8m ago</span>
-                    </div>
-                  </div>
+              <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
+                <h3 className="text-lg font-semibold text-[#333333] dark:text-white">Knowledge signals</h3>
+                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
+                  Auto-generated content vs manual curation plus trending entities from the analytics clusters.
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {knowledgeTags.length ? (
+                    knowledgeTags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="rounded-full bg-[#E89F88]/15 dark:bg-blue-500/15 px-3 py-1 text-xs font-medium text-[#E06F4F] dark:text-blue-200"
+                      >
+                        {tag}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-sm text-[#9c8f86] dark:text-slate-400">
+                      No entities highlighted yet—once GLPI resolutions land, emerging topics will display here.
+                    </span>
+                  )}
                 </div>
-              </div>
-            </div>
-
-            {/* High Priority Chat 2 */}
-            <div className="group p-4 sm:p-5 lg:p-6 hover:bg-[#F5ECE5]/30 dark:hover:bg-slate-700/30 cursor-pointer transition-all duration-200 border-l-4 border-red-500/50">
-              <div className="flex items-start gap-3 lg:gap-4">
-                <div className="relative flex-shrink-0 mt-0.5">
-                  <div className="w-3 h-3 lg:w-4 lg:h-4 bg-red-500 rounded-full shadow-lg shadow-red-500/50" />
-                  <div className="absolute inset-0 bg-red-500 rounded-full animate-ping opacity-75" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <p className="font-semibold text-sm sm:text-base lg:text-lg text-[#333333] dark:text-white group-hover:text-[#E89F88] dark:group-hover:text-blue-400 transition-colors">Michael Brown</p>
-                        <span className="text-[#6b5f57] dark:text-slate-400 text-xs font-mono">#12349</span>
-                      </div>
-                      <p className="text-[#6b5f57] dark:text-slate-300 text-sm sm:text-base leading-relaxed">This is unacceptable! I want to speak to a manager.</p>
-                    </div>
-                    <div className="text-left sm:text-right flex-shrink-0">
-                      <div className="bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-500/20 border text-xs font-semibold px-2 py-1 rounded-full shadow-sm">
-                        Needs Agent
-                      </div>
-                      <span className="text-[#6b5f57] dark:text-slate-400 text-xs mt-1 block">12m ago</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+              </article>
+            </section>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

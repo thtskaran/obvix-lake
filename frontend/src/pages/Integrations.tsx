@@ -1,5 +1,5 @@
 // src/pages/Integrations.tsx
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 
 export const Integrations: React.FC = () => {
   const [loading, setLoading] = useState(true);
@@ -45,18 +45,6 @@ export const Integrations: React.FC = () => {
         <div className="flex-1 h-8 lg:h-10 bg-[#E89F88]/15 dark:bg-slate-700/50 rounded-xl" />
         <div className="w-16 lg:w-20 h-8 lg:h-10 bg-[#6b5f57]/10 dark:bg-slate-700/30 rounded-xl" />
       </div>
-    </div>
-  );
-
-  // Updated Stats Skeleton Component
-  const StatsSkeleton = () => (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">
-      {[...Array(4)].map((_, i) => (
-        <div key={i} className="text-center p-3 lg:p-4 rounded-xl bg-[#F5ECE5]/40 dark:bg-slate-700/30 backdrop-blur-sm border border-[#F5ECE5] dark:border-slate-600/30 animate-pulse">
-          <div className="h-6 lg:h-8 bg-[#E89F88]/20 dark:bg-slate-700/50 rounded-lg mb-2 mx-auto w-8" />
-          <div className="h-3 lg:h-4 bg-[#6b5f57]/15 dark:bg-slate-700/30 rounded-lg mx-auto w-20" />
-        </div>
-      ))}
     </div>
   );
 

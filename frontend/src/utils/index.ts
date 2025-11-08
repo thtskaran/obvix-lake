@@ -5,16 +5,20 @@ export const formatDate = (date: Date): string => {
   return date.toISOString();
 };
 
-export const debounce = (func: Function, delay: number) => {
+export const debounce = <T extends (...args: unknown[]) => void>(func: T, delay: number) => {
   // TODO: Implement debounce utility
-  let timeoutId: NodeJS.Timeout;
-  return (...args: any[]) => {
-    clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => func.apply(null, args), delay);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  return (...args: Parameters<T>) => {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+    timeoutId = setTimeout(() => {
+      func(...args);
+    }, delay);
   };
 };
 
-export const classNames = (...classes: string[]) => {
+export const classNames = (...classes: Array<string | false | null | undefined>) => {
   return classes.filter(Boolean).join(' ');
 };
 

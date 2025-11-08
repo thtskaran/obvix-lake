@@ -8,7 +8,7 @@ interface FSMState {
   // TODO: Add actions for managing application state
 }
 
-export const useFSMStore = create<FSMState>((set) => ({
+export const useFSMStore = create<FSMState>(() => ({
   currentUser: null,
   sessionActive: false,
   systemStatus: 'idle',
