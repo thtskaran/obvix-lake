@@ -1010,12 +1010,9 @@ def start_background_threads():
 # HISTORY
 # ==============================================================================
 def save_message_to_history(user_id: str, role: str, content: str):
-    if role == "user" and content:
-        stored_content = f"USER: {content}"
-    else:
-        stored_content = content
+    # Store content as-is; _format_transcript() will add role prefixes when needed
     db[CHAT_HISTORY_COL].insert_one(
-        {"user_id": user_id, "role": role, "content": stored_content, "timestamp": datetime.now()}
+        {"user_id": user_id, "role": role, "content": content, "timestamp": datetime.now()}
     )
 
 
