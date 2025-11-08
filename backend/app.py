@@ -35,6 +35,7 @@ from pypdf import PdfReader
 from services.knowledge_pipeline import KnowledgePipeline
 from services.rag_pipeline import HybridRAGPipeline
 from services.ticket_router import TicketRouter
+from services.docling_service import create_docling_converter
 
 
 # ==============================================================================
@@ -182,6 +183,13 @@ rag_pipeline = HybridRAGPipeline(
     semantic_weight=RAG_SEMANTIC_WEIGHT,
 )
 
+# Initialize Docling converter for advanced document processing
+docling_converter = create_docling_converter(
+    max_chunk_tokens=int(os.environ.get("DOCLING_MAX_CHUNK_TOKENS", "512")),
+    preserve_tables=_env_bool("DOCLING_PRESERVE_TABLES", "true"),
+    preserve_formatting=_env_bool("DOCLING_PRESERVE_FORMATTING", "true"),
+)
+
 
 GLPI_HOST = os.environ.get("GLPI_HOST")
 GLPI_APP_TOKEN = os.environ.get("GLPI_APP_TOKEN")
@@ -194,6 +202,11 @@ GLPI_ENABLED = bool(GLPI_HOST and GLPI_APP_TOKEN and GLPI_API_TOKEN)
 # DRIVE HELPERS
 # ==============================================================================
 def fetch_plain_text(file_id: str, mime_type: str) -> str:
+    """Fetch and extract text from Google Drive files.
+    
+    For PDFs and supported document types, uses Docling for advanced extraction
+    with structure preservation. Falls back to simple text extraction for other types.
+    """
     try:
         request_ = (
             drive_service.files().export_media(fileId=file_id, mimeType="text/plain")
@@ -206,15 +219,61 @@ def fetch_plain_text(file_id: str, mime_type: str) -> str:
         while not done:
             _, done = downloader.next_chunk()
         binary_data = fh.getvalue()
+        
+        # For Google Docs, just decode as text
         if "google-apps" in mime_type:
             return binary_data.decode("utf-8", errors="ignore")
-        if mime_type in PDF_MIME_TYPES:
-            pdf_text = _extract_pdf_text(binary_data, file_id)
-            if pdf_text:
-                return pdf_text
+        
+        # For PDFs and other document types, use Docling for advanced extraction
+        if mime_type in PDF_MIME_TYPES or mime_type in {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # DOCX
+            "application/msword",  # DOC
+        }:
+            docling_text = _extract_with_docling(binary_data, mime_type, file_id)
+            if docling_text:
+                return docling_text
+            # Fallback to simple PDF extraction if Docling fails
+            if mime_type in PDF_MIME_TYPES:
+                pdf_text = _extract_pdf_text(binary_data, file_id)
+                if pdf_text:
+                    return pdf_text
+        
+        # Default: decode as text
         return binary_data.decode("utf-8", errors="ignore")
     except Exception as e:
         logging.error(f"Failed to fetch text for file {file_id}: {e}")
+        return ""
+
+
+def _extract_with_docling(data: bytes, mime_type: str, file_id: str) -> str:
+    """Extract text from document using Docling with structure preservation."""
+    if not data:
+        return ""
+    
+    try:
+        # Determine file extension from MIME type
+        ext_map = {
+            "application/pdf": ".pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+            "application/msword": ".doc",
+        }
+        extension = ext_map.get(mime_type, ".pdf")
+        filename = f"{file_id}{extension}"
+        
+        # Convert to Docling document
+        docling_doc = docling_converter.convert_bytes_to_docling(data, mime_type, filename)
+        if not docling_doc:
+            logging.warning("Docling conversion failed for %s, will try fallback", file_id)
+            return ""
+        
+        # Extract text (Docling preserves structure as markdown)
+        text = docling_converter.extract_text_from_docling(docling_doc)
+        if text:
+            logging.info("Successfully extracted %d chars from %s using Docling", len(text), file_id)
+        return text
+        
+    except Exception as exc:
+        logging.warning("Docling extraction failed for %s: %s, will use fallback", file_id, exc)
         return ""
 
 
@@ -240,6 +299,101 @@ def _extract_pdf_text(data: bytes, file_id: str) -> str:
     if not combined:
         logging.info("PDF %s produced no extractable text; skipping.", file_id)
     return combined
+
+
+def fetch_and_chunk_with_docling(file_id: str, mime_type: str, filename: str) -> List[Dict[str, Any]]:
+    """Fetch a document and return semantic chunks using Docling.
+    
+    Returns a list of chunks with content and metadata, ready for embedding.
+    Falls back to text-based chunking if Docling fails.
+    """
+    chunks_data: List[Dict[str, Any]] = []
+    
+    try:
+        # Only use Docling for supported document types
+        if mime_type not in PDF_MIME_TYPES and mime_type not in {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/msword",
+        }:
+            # For other types, use standard text extraction
+            logging.info("File %s (type %s) not supported by Docling, using standard extraction", filename, mime_type)
+            text = fetch_plain_text(file_id, mime_type)
+            simple_chunks = _split_text_for_embeddings(text)
+            return [{"content": chunk, "metadata": {"filename": filename}} for chunk in simple_chunks]
+        
+        logging.info("Starting Docling chunking for %s (type: %s)", filename, mime_type)
+        
+        # Fetch file bytes
+        request_ = drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request_)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        binary_data = fh.getvalue()
+        
+        if not binary_data:
+            logging.warning("No data retrieved for file %s", file_id)
+            return []
+        
+        logging.info("Retrieved %d bytes for %s", len(binary_data), filename)
+        
+        # Convert to Docling document
+        docling_doc = docling_converter.convert_bytes_to_docling(binary_data, mime_type, filename)
+        if not docling_doc:
+            logging.warning("Docling conversion failed for %s, using fallback chunking", filename)
+            text = fetch_plain_text(file_id, mime_type)
+            simple_chunks = _split_text_for_embeddings(text)
+            return [{"content": chunk, "metadata": {"filename": filename}} for chunk in simple_chunks]
+        
+        logging.info("Docling conversion successful for %s, starting chunking", filename)
+        
+        # Get semantic chunks from Docling
+        # Note: Docling v2+ uses text export internally, not page.elements
+        doc_chunks = docling_converter.chunk_docling_document(docling_doc, filename)
+        
+        if not doc_chunks:
+            logging.error("Docling chunking returned 0 chunks for %s! Using PyPDF fallback", filename)
+            # Ultimate fallback to PyPDF
+            text = fetch_plain_text(file_id, mime_type)
+            if text:
+                simple_chunks = _split_text_for_embeddings(text)
+                return [{"content": chunk, "metadata": {"filename": filename}} for chunk in simple_chunks]
+            return []
+        
+        # Merge very small chunks
+        original_count = len(doc_chunks)
+        doc_chunks = docling_converter.merge_small_chunks(doc_chunks, min_tokens=100)
+        logging.info("Merged chunks: %d -> %d for %s", original_count, len(doc_chunks), filename)
+        
+        # Convert to dict format
+        for chunk in doc_chunks:
+            chunk_metadata = dict(chunk.metadata)
+            chunk_metadata["chunk_type"] = chunk.chunk_type
+            chunk_metadata["position"] = chunk.position
+            
+            # Add heading context
+            if chunk.heading_hierarchy:
+                chunk_metadata["headings"] = " > ".join(chunk.heading_hierarchy)
+            
+            chunks_data.append({
+                "content": chunk.content,
+                "metadata": chunk_metadata,
+            })
+        
+        logging.info("Successfully created %d semantic chunks from %s using Docling", len(chunks_data), filename)
+        return chunks_data
+        
+    except Exception as exc:
+        logging.error("Failed to fetch and chunk %s with Docling: %s", filename, exc, exc_info=True)
+        # Final fallback
+        try:
+            text = fetch_plain_text(file_id, mime_type)
+            simple_chunks = _split_text_for_embeddings(text)
+            return [{"content": chunk, "metadata": {"filename": filename}} for chunk in simple_chunks]
+        except Exception as fallback_exc:
+            logging.error("Fallback chunking also failed: %s", fallback_exc, exc_info=True)
+            return []
 
 
 def _parse_key_value_doc(text_content: str) -> Dict[str, Any]:
@@ -567,6 +721,79 @@ def upsert_persona_document(persona_name: str, file_id: str, file_name: str, tex
         persona_collection.bulk_write(operations)
 
 
+def upsert_persona_document_chunks(
+    persona_name: str,
+    file_id: str,
+    file_name: str,
+    chunks_data: List[Dict[str, Any]],
+):
+    """Upsert pre-chunked document data (from Docling) into the persona collection.
+    
+    Args:
+        persona_name: Name of the persona
+        file_id: Google Drive file ID
+        file_name: Original filename
+        chunks_data: List of dicts with 'content' and 'metadata' keys
+    """
+    collection_name = f"{PERSONA_COLLECTION_PREFIX}{persona_name}"
+    persona_collection = db[collection_name]
+    
+    if not chunks_data:
+        logging.warning("No chunks provided for %s", file_name)
+        return
+    
+    # Extract content for embedding
+    chunk_contents = [chunk["content"] for chunk in chunks_data]
+    
+    # Generate embeddings for all chunks
+    try:
+        embeddings = build_embeddings(chunk_contents)
+    except Exception as exc:
+        logging.error("Embedding generation failed for persona %s file %s: %s", persona_name, file_name, exc)
+        embeddings = []
+    
+    # Build bulk operations
+    operations = []
+    for idx, chunk_data in enumerate(chunks_data):
+        embedding = embeddings[idx] if idx < len(embeddings) else None
+        metadata = chunk_data.get("metadata", {})
+        
+        # Enhance metadata with file info
+        metadata["file_id"] = file_id
+        metadata["filename"] = file_name
+        metadata["source"] = "docling_processed"
+        
+        operations.append(
+            UpdateOne(
+                {"file_id": file_id, "chunk_index": idx},
+                {
+                    "$set": {
+                        "doc_type": "knowledge",
+                        "file_id": file_id,
+                        "chunk_index": idx,
+                        "content": chunk_data["content"],
+                        "embedding": embedding,
+                        "metadata": metadata,
+                        "chunk_type": metadata.get("chunk_type", "paragraph"),
+                        "source": "docling_processed",
+                    }
+                },
+                upsert=True,
+            )
+        )
+    
+    if operations:
+        result = persona_collection.bulk_write(operations)
+        logging.info(
+            "Upserted %d Docling chunks for %s (matched: %d, modified: %d, upserted: %d)",
+            len(operations),
+            file_name,
+            result.matched_count,
+            result.modified_count,
+            result.upserted_count,
+        )
+
+
 def _persona_slug(name: Optional[str]) -> str:
     return (name or "").lower().replace(" ", "_")
 
@@ -672,10 +899,39 @@ def sync_drive_personas_task():
                     current_file_ids.add(str(file_id))
                     if file_id not in processed_files or processed_files.get(file_id) != modified_time:
                         logging.info(f"Processing '{file['name']}' for persona '{persona_name}'...")
-                        text = fetch_plain_text(file_id, file["mimeType"])
-                        if text:
-                            upsert_persona_document(persona_name, file_id, file["name"], text)
-                            processed_files[file_id] = modified_time
+                        
+                        # Use Docling for PDFs and DOCX for better chunking
+                        mime_type = file["mimeType"]
+                        use_docling = mime_type in PDF_MIME_TYPES or mime_type in {
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/msword",
+                        }
+                        
+                        if use_docling:
+                            # Use Docling-based semantic chunking
+                            try:
+                                chunks_data = fetch_and_chunk_with_docling(file_id, mime_type, file["name"])
+                                if chunks_data:
+                                    upsert_persona_document_chunks(persona_name, file_id, file["name"], chunks_data)
+                                    processed_files[file_id] = modified_time
+                                else:
+                                    logging.warning("No chunks generated for %s, falling back to text extraction", file["name"])
+                                    text = fetch_plain_text(file_id, mime_type)
+                                    if text:
+                                        upsert_persona_document(persona_name, file_id, file["name"], text)
+                                        processed_files[file_id] = modified_time
+                            except Exception as exc:
+                                logging.error("Docling processing failed for %s: %s, using fallback", file["name"], exc)
+                                text = fetch_plain_text(file_id, mime_type)
+                                if text:
+                                    upsert_persona_document(persona_name, file_id, file["name"], text)
+                                    processed_files[file_id] = modified_time
+                        else:
+                            # Use standard text extraction for other file types
+                            text = fetch_plain_text(file_id, mime_type)
+                            if text:
+                                upsert_persona_document(persona_name, file_id, file["name"], text)
+                                processed_files[file_id] = modified_time
                 persona_collection = db[f"{PERSONA_COLLECTION_PREFIX}{persona_name}"]
                 existing_cursor = persona_collection.find({"file_id": {"$exists": True}}, {"file_id": 1})
                 existing_ids = {str(doc.get("file_id")) for doc in existing_cursor if doc.get("file_id")}
