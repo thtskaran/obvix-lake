@@ -10,6 +10,7 @@ import type {
   TicketClassification,
   TicketKnowledgeMatch,
 } from "../types/api";
+import { usePersonas } from "../hooks/usePersonas";
 
 interface RoutedTicket {
   id: string;
@@ -65,6 +66,8 @@ export const Tickets: React.FC = () => {
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [activeController, setActiveController] = useState<AbortController | null>(null);
   const [feedbackStates, setFeedbackStates] = useState<Record<string, FeedbackState>>({});
+  const { personas, isLoading: isLoadingPersonas, error: personasError, refresh: refreshPersonas } = usePersonas([DEFAULT_PERSONA]);
+  const [isRefreshingPersonas, setIsRefreshingPersonas] = useState(false);
 
   useEffect(() => () => {
     activeController?.abort();
@@ -76,6 +79,13 @@ export const Tickets: React.FC = () => {
     }
     setSelectedTicketId(tickets[0].id);
   }, [tickets, selectedTicketId]);
+
+  useEffect(() => {
+    if (!persona && personas.length) {
+      const fallback = personas.includes(DEFAULT_PERSONA) ? DEFAULT_PERSONA : personas[0];
+      setPersona(fallback);
+    }
+  }, [persona, personas]);
 
   useEffect(() => {
     if (!selectedTicketId) {
@@ -164,6 +174,15 @@ export const Tickets: React.FC = () => {
     } finally {
       setIsRouting(false);
       setActiveController(null);
+    }
+  };
+
+  const handlePersonaRefresh = async () => {
+    setIsRefreshingPersonas(true);
+    try {
+      await refreshPersonas();
+    } finally {
+      setIsRefreshingPersonas(false);
     }
   };
 
@@ -313,12 +332,55 @@ export const Tickets: React.FC = () => {
               <div className="space-y-4">
                 <label className="block text-sm font-medium text-[#6b5f57] dark:text-slate-300">
                   Persona (optional)
-                  <input
-                    className="mt-2 w-full rounded-xl border border-[#F5ECE5] dark:border-slate-600/50 bg-white/80 dark:bg-slate-900/40 px-4 py-3 text-sm text-[#333333] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 dark:focus:ring-blue-500/40"
-                    placeholder="ol_rpi"
-                    value={persona}
-                    onChange={(event) => setPersona(event.target.value)}
-                  />
+                  <div className="mt-2 flex flex-col gap-2">
+                    <div className="flex items-center gap-2">
+                      <input
+                        className="flex-1 rounded-xl border border-[#F5ECE5] dark:border-slate-600/50 bg-white/80 dark:bg-slate-900/40 px-4 py-3 text-sm text-[#333333] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 dark:focus:ring-blue-500/40"
+                        placeholder="ol_rpi"
+                        value={persona}
+                        onChange={(event) => setPersona(event.target.value)}
+                        list={personas.length ? "persona-options" : undefined}
+                        autoComplete="off"
+                      />
+                      <button
+                        type="button"
+                        onClick={handlePersonaRefresh}
+                        className="inline-flex items-center gap-2 rounded-xl border border-[#F5ECE5] bg-white/70 px-3 py-2 text-xs font-semibold text-[#6b5f57] transition-colors hover:bg-[#F5ECE5]/60 dark:border-slate-600/40 dark:bg-slate-800/50 dark:text-slate-200 dark:hover:bg-slate-700"
+                        disabled={isLoadingPersonas || isRefreshingPersonas}
+                        title="Refresh persona list"
+                      >
+                        {(isLoadingPersonas || isRefreshingPersonas) ? (
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#E89F88]/40 border-t-[#E89F88]" />
+                        ) : (
+                          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v6h6M20 20v-6h-6" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19A9 9 0 0119 5" />
+                          </svg>
+                        )}
+                        <span className="hidden sm:inline">Refresh</span>
+                      </button>
+                    </div>
+                    {personasError ? (
+                      <div className="rounded-lg border border-red-200 bg-red-50/70 px-3 py-2 text-xs text-red-700 dark:border-red-800/60 dark:bg-red-500/10 dark:text-red-200">
+                        Failed to load personas. {" "}
+                        <button
+                          type="button"
+                          onClick={handlePersonaRefresh}
+                          className="font-semibold underline"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-[#6b5f57] dark:text-slate-400">
+                        {isLoadingPersonas
+                          ? "Syncing personas from the backend..."
+                          : personas.length
+                            ? `Choose from ${personas.length} synced personas or type a custom ID.`
+                            : "Type a persona ID that starts with ol_."}
+                      </p>
+                    )}
+                  </div>
                 </label>
 
                 <label className="block text-sm font-medium text-[#6b5f57] dark:text-slate-300">
@@ -577,6 +639,14 @@ export const Tickets: React.FC = () => {
           </div>
         </section>
       </div>
+
+      {personas.length ? (
+        <datalist id="persona-options">
+          {personas.map((slug) => (
+            <option key={slug} value={slug} />
+          ))}
+        </datalist>
+      ) : null}
     </div>
   );
 };

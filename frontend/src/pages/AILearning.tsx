@@ -1,683 +1,733 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { sendChatMessage } from "../app/api/endpoints";
+import { usePersonas } from "../hooks/usePersonas";
+import type {
+  ChatResponse,
+  ChatSource,
+  TicketKnowledgeMatch,
+  TicketRouteResponse,
+} from "../types/api";
 
-export const AILearning: React.FC = () => {
-  const [loading, setLoading] = useState(true);
+const DEFAULT_PERSONA = "ol_rpi";
 
-  // Simulate loading state
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setLoading(false);
-    }, 2000);
+type MessageRole = "user" | "assistant" | "system";
 
-    return () => clearTimeout(timer);
-  }, []);
+interface ConsoleMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  timestamp: string;
+  metadata?: ChatResponse;
+  error?: boolean;
+}
 
-  // Memoized data to prevent re-renders
-  const metricsData = useMemo(() => [
-    {
-      id: 'learning-pipeline',
-      title: 'Learning Pipeline',
-      value: '127',
-      description: 'New solutions learned',
-      trend: '+23 this week',
-      color: 'green',
-      status: 'Active',
-      icon: (
-        <svg className="w-5 h-5 lg:w-6 lg:h-6 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-        </svg>
-      )
-    },
-    {
-      id: 'knowledge-nodes',
-      title: 'Knowledge Nodes',
-      value: '2,847',
-      description: 'Connected entities',
-      trend: '+156 new connections',
-      color: 'blue',
-      status: 'Expanding',
-      icon: (
-        <svg className="w-5 h-5 lg:w-6 lg:h-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-        </svg>
-      )
-    },
-    {
-      id: 'handoff-rate',
-      title: 'Handoff Rate',
-      value: '8.7%',
-      description: 'Requires human agent',
-      trend: '-2.3% from last month',
-      color: 'amber',
-      status: 'Improving',
-      icon: (
-        <svg className="w-5 h-5 lg:w-6 lg:h-6 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-        </svg>
-      )
-    },
-    {
-      id: 'confidence-score',
-      title: 'Confidence Score',
-      value: '94.2%',
-      description: 'Average prediction accuracy',
-      trend: '+1.8% improvement',
-      color: 'purple',
-      status: 'High',
-      icon: (
-        <svg className="w-5 h-5 lg:w-6 lg:h-6 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-        </svg>
-      )
-    }
-  ], []);
+function createMessageId(prefix: string): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${prefix}_${crypto.randomUUID()}`;
+  }
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
 
-  // Optimized Skeleton Components with will-change for better performance
-  const MetricsSkeleton = useCallback(() => (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 lg:gap-6 mb-6 lg:mb-8">
-      {[...Array(4)].map((_, i) => (
-        <div key={i} className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 animate-pulse will-change-transform">
-          <div className="flex items-center justify-between mb-3 lg:mb-4">
-            <div className="w-12 h-12 bg-[#F5ECE5] dark:bg-slate-700 rounded-xl"></div>
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 bg-[#F5ECE5] dark:bg-slate-700 rounded-full"></div>
-              <div className="w-16 h-5 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg"></div>
-            </div>
-          </div>
-          <div className="h-5 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg mb-2 w-3/4"></div>
-          <div className="h-8 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg mb-1 w-1/2"></div>
-          <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-2/3"></div>
-        </div>
-      ))}
-    </div>
-  ), []);
+function formatTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
-  const TableSkeleton = useCallback(() => (
-    <div className="overflow-x-auto">
-      <table className="w-full">
-        <thead className="border-b border-[#F5ECE5] dark:border-slate-600/30">
-          <tr>
-            {[...Array(4)].map((_, i) => (
-              <th key={i} className="text-left py-3 px-4">
-                <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-20"></div>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-[#F5ECE5] dark:divide-slate-600/20">
-          {[...Array(3)].map((_, i) => (
-            <tr key={i} className="animate-pulse">
-              <td className="py-4 px-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg flex-shrink-0"></div>
-                  <div className="space-y-1 min-w-0">
-                    <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-24"></div>
-                    <div className="h-3 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-20"></div>
-                  </div>
-                </div>
-              </td>
-              <td className="py-4 px-4">
-                <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-48 max-w-full"></div>
-              </td>
-              <td className="py-4 px-4">
-                <div className="flex items-center gap-2">
-                  <div className="w-16 h-2 bg-[#F5ECE5] dark:bg-slate-700 rounded-full"></div>
-                  <div className="w-8 h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded"></div>
-                </div>
-              </td>
-              <td className="py-4 px-4">
-                <div className="flex gap-2">
-                  <div className="w-16 h-8 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg"></div>
-                  <div className="w-12 h-8 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg"></div>
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  ), []);
-
-  const RightColumnSkeleton = useCallback(() => (
-    <div className="space-y-6 lg:space-y-8">
-      {[...Array(2)].map((_, cardIndex) => (
-        <div key={cardIndex} className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 animate-pulse">
-          <div className="h-6 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg mb-4 lg:mb-6 w-40"></div>
-          <div className="space-y-4 lg:space-y-6">
-            {[...Array(3)].map((_, i) => (
-              <div key={i}>
-                <div className="flex justify-between items-center mb-2">
-                  <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-32"></div>
-                  <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-12"></div>
-                </div>
-                <div className="w-full bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-2">
-                  <div className="bg-[#E89F88] dark:bg-blue-500 h-2 rounded-full w-3/4"></div>
-                </div>
-                <div className="h-3 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg mt-1 w-3/5"></div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  ), []);
-
-  // Memoized metric card component
-  const MetricCard = useCallback(({ metric }) => {
-    const getColorClasses = (color) => {
-      const colorMap = {
-        green: {
-          bg: 'bg-green-100 dark:bg-green-500/20',
-          text: 'text-green-600 dark:text-green-400',
-          dot: 'bg-green-500',
-          badge: 'text-green-600 dark:text-green-300 bg-green-100 dark:bg-green-500/20',
-          trend: 'text-green-600 dark:text-green-300'
-        },
-        blue: {
-          bg: 'bg-blue-100 dark:bg-blue-500/20',
-          text: 'text-blue-600 dark:text-blue-400',
-          dot: 'bg-blue-500',
-          badge: 'text-blue-600 dark:text-blue-300 bg-blue-100 dark:bg-blue-500/20',
-          trend: 'text-blue-600 dark:text-blue-300'
-        },
-        amber: {
-          bg: 'bg-amber-100 dark:bg-amber-500/20',
-          text: 'text-amber-600 dark:text-amber-400',
-          dot: 'bg-amber-500',
-          badge: 'text-amber-600 dark:text-amber-300 bg-amber-100 dark:bg-amber-500/20',
-          trend: 'text-green-600 dark:text-green-300'
-        },
-        purple: {
-          bg: 'bg-purple-100 dark:bg-purple-500/20',
-          text: 'text-purple-600 dark:text-purple-400',
-          dot: 'bg-purple-500',
-          badge: 'text-purple-600 dark:text-purple-300 bg-purple-100 dark:bg-purple-500/20',
-          trend: 'text-green-600 dark:text-green-300'
-        }
+function confidenceTone(confidence?: ChatResponse["confidence"]) {
+  const normalized = confidence?.toUpperCase() ?? "";
+  switch (normalized) {
+    case "HIGH":
+      return {
+        label: "High",
+        badgeClass:
+          "bg-emerald-100/80 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300",
+        dotClass: "bg-emerald-500",
       };
-      return colorMap[color];
-    };
+    case "MEDIUM":
+    case "MED":
+      return {
+        label: "Medium",
+        badgeClass:
+          "bg-amber-100/80 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300",
+        dotClass: "bg-amber-500",
+      };
+    case "LOW":
+      return {
+        label: "Low",
+        badgeClass:
+          "bg-rose-100/80 dark:bg-rose-500/20 text-rose-700 dark:text-rose-300",
+        dotClass: "bg-rose-500",
+      };
+    default:
+      return {
+        label: confidence ?? "Unknown",
+        badgeClass:
+          "bg-slate-200/70 dark:bg-slate-700/40 text-slate-700 dark:text-slate-300",
+        dotClass: "bg-slate-400",
+      };
+  }
+}
 
-    const colors = getColorClasses(metric.color);
+function formatSimilarity(similarity?: number): string {
+  if (typeof similarity !== "number" || Number.isNaN(similarity)) {
+    return "–";
+  }
+  return `${Math.round(similarity * 100)}%`;
+}
 
-    return (
-      <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:shadow-lg transition-shadow duration-200 will-change-transform">
-        <div className="flex items-center justify-between mb-3 lg:mb-4">
-          <div className={`p-3 ${colors.bg} rounded-xl`}>
-            {metric.icon}
-          </div>
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 ${colors.dot} rounded-full ${metric.status === 'Active' || metric.status === 'Expanding' ? 'animate-pulse' : ''}`}></div>
-            <span className={`text-xs font-medium ${colors.badge} px-2 py-1 rounded-lg`}>
-              {metric.status}
-            </span>
-          </div>
-        </div>
-        <h3 className="text-lg font-semibold text-[#333333] dark:text-white mb-2">{metric.title}</h3>
-        <p className={`text-2xl sm:text-3xl lg:text-4xl font-bold ${colors.text} mb-1`}>{metric.value}</p>
-        <p className="text-sm text-[#6b5f57] dark:text-slate-400">{metric.description}</p>
-        <div className={`mt-3 text-xs ${colors.trend}`}>{metric.trend}</div>
-      </div>
-    );
-  }, []);
+function isTicketRouteResponse(value: unknown): value is TicketRouteResponse {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<TicketRouteResponse>;
+  return (
+    typeof candidate === "object" &&
+    candidate !== null &&
+    "decision" in candidate &&
+    "classification" in candidate &&
+    "matches" in candidate
+  );
+}
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
-        {/* Background Pattern */}
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(232,159,136,0.03),transparent)] dark:bg-[radial-gradient(circle_at_20%_40%,rgba(120,119,198,0.1),transparent)] opacity-50" />
-        
-        <div className="relative z-10 p-4 sm:p-6 lg:p-8">
-          {/* Header Skeleton */}
-          <div className="flex flex-col lg:flex-row lg:justify-between gap-4 lg:gap-6 mb-6 lg:mb-8 animate-pulse">
-            <div className="space-y-2">
-              <div className="h-8 sm:h-10 lg:h-12 bg-[#F5ECE5] dark:bg-slate-700 rounded w-64 lg:w-80"></div>
-              <div className="h-4 lg:h-5 bg-[#F5ECE5] dark:bg-slate-700 rounded w-80 lg:w-96"></div>
-            </div>
-            
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 lg:gap-4">
-              <div className="h-12 bg-[#F5ECE5] dark:bg-slate-700 rounded-xl w-full sm:w-40"></div>
-              <div className="h-12 bg-[#F5ECE5] dark:bg-slate-700 rounded-xl w-full sm:w-32"></div>
-            </div>
-          </div>
+function sourceKey(source: ChatSource, index: number) {
+  return `${source.id ?? source.source ?? "source"}_${index}`;
+}
 
-          {/* Metrics Skeleton */}
-          <MetricsSkeleton />
+function matchKey(match: TicketKnowledgeMatch, index: number) {
+  return `${match.article_id ?? match.title ?? "match"}_${index}`;
+}
 
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 lg:gap-8 mb-6 lg:mb-8">
-            {/* Left Column Skeleton */}
-            <div className="xl:col-span-2 space-y-6 lg:space-y-8">
-              {/* High-Volume Issues Skeleton */}
-              <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 animate-pulse">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 lg:mb-6">
-                  <div className="h-6 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-48 lg:w-64"></div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 bg-[#F5ECE5] dark:bg-slate-700 rounded-full"></div>
-                    <div className="w-32 h-5 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg"></div>
-                  </div>
-                </div>
-                <div className="space-y-4">
-                  {[...Array(3)].map((_, i) => (
-                    <div key={i} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-xl bg-[#F5ECE5]/30 dark:bg-slate-700/20">
-                      <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg flex-shrink-0"></div>
-                        <div className="space-y-1 min-w-0">
-                          <div className="h-4 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-32 sm:w-40"></div>
-                          <div className="h-3 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-28 sm:w-32"></div>
-                        </div>
-                      </div>
-                      <div className="text-left sm:text-right space-y-1 flex-shrink-0">
-                        <div className="h-5 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-16 sm:w-20"></div>
-                        <div className="w-16 sm:w-20 h-6 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg"></div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Solutions Table Skeleton */}
-              <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 lg:mb-6">
-                  <div className="h-6 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg w-60 lg:w-80"></div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 bg-[#F5ECE5] dark:bg-slate-700 rounded-full"></div>
-                    <div className="w-28 h-5 bg-[#F5ECE5] dark:bg-slate-700 rounded-lg"></div>
-                  </div>
-                </div>
-                <TableSkeleton />
-              </div>
-            </div>
-
-            {/* Right Column Skeleton */}
-            <RightColumnSkeleton />
-          </div>
-        </div>
-      </div>
-    );
+const AssistantMetadata: React.FC<{ metadata?: ChatResponse }> = ({ metadata }) => {
+  if (!metadata) {
+    return null;
   }
 
+  const tone = confidenceTone(metadata.confidence);
+  const router = isTicketRouteResponse(metadata.router) ? metadata.router : undefined;
+  const matches = router?.matches ?? [];
+  const sources = metadata.sources ?? [];
+
   return (
-    <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
-      {/* Background Pattern */}
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(232,159,136,0.03),transparent)] dark:bg-[radial-gradient(circle_at_20%_40%,rgba(120,119,198,0.1),transparent)] opacity-50" />
-      
-      <div className="relative z-10 p-4 sm:p-6 lg:p-8">
-        {/* Header Section */}
-        <div className="flex flex-col lg:flex-row lg:justify-between gap-4 lg:gap-6 mb-6 lg:mb-8">
-          <div className="space-y-2">
-            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-semibold text-[#333333] dark:text-white tracking-tight">
-              AI Learning & Performance
-            </h1>
-            <p className="text-[#6b5f57] dark:text-slate-400 text-base lg:text-lg">
-              Monitor AI training, approve new solutions, and optimize performance metrics
+    <div className="mt-4 space-y-4 rounded-2xl border border-[#F5ECE5] dark:border-slate-600/40 bg-[#FDFBFA]/80 dark:bg-slate-900/40 p-4">
+      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+        <span
+          className={`inline-flex items-center gap-2 rounded-full px-3 py-1 ${tone.badgeClass}`}
+        >
+          <span className={`h-2 w-2 rounded-full ${tone.dotClass}`} />
+          Confidence: {tone.label}
+        </span>
+        {metadata.ticket_forwarded && (
+          <span className="inline-flex items-center gap-2 rounded-full bg-blue-100/80 dark:bg-blue-500/20 px-3 py-1 text-blue-700 dark:text-blue-300">
+            Forwarded to ticketing
+          </span>
+        )}
+        {metadata.escalation_deferred && (
+          <span className="inline-flex items-center gap-2 rounded-full bg-amber-100/80 dark:bg-amber-500/20 px-3 py-1 text-amber-700 dark:text-amber-300">
+            Escalation deferred
+          </span>
+        )}
+        {metadata.ticket_section_closed && (
+          <span className="inline-flex items-center gap-2 rounded-full bg-emerald-100/80 dark:bg-emerald-500/20 px-3 py-1 text-emerald-700 dark:text-emerald-300">
+            Ticket section closed
+          </span>
+        )}
+        {metadata.glpi_ticket_id && (
+          <span className="inline-flex items-center gap-2 rounded-full bg-purple-100/80 dark:bg-purple-500/20 px-3 py-1 text-purple-700 dark:text-purple-300">
+            GLPI #{metadata.glpi_ticket_id}
+          </span>
+        )}
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1 text-sm">
+          <p className="text-[#333333] dark:text-white font-semibold">Knowledge lookups</p>
+          <p className="text-[#6b5f57] dark:text-slate-300">
+            {metadata.assist_attempts_with_kb > 0
+              ? `${metadata.assist_attempts_with_kb} knowledge base attempts`
+              : "No knowledge base lookups recorded."}
+          </p>
+        </div>
+
+        {(metadata.active_ticket || metadata.ticket_status) && (
+          <div className="space-y-1 text-sm">
+            <p className="text-[#333333] dark:text-white font-semibold">Ticket status</p>
+            <p className="text-[#6b5f57] dark:text-slate-300">
+              {metadata.active_ticket?.ticket_id
+                ? `#${metadata.active_ticket.ticket_id} · ${
+                    metadata.active_ticket.status ??
+                    metadata.ticket_status ??
+                    "Status unknown"
+                  }`
+                : metadata.ticket_status ??
+                  metadata.active_ticket?.status ??
+                  "Not available"}
             </p>
           </div>
+        )}
+      </div>
 
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 lg:gap-4">
-            {/* Time Range Filter */}
-            <button className="flex items-center gap-3 bg-white dark:bg-slate-800/60 backdrop-blur border border-[#F5ECE5] dark:border-slate-600/40 hover:border-[#E89F88] dark:hover:border-blue-400/50 text-[#333333] dark:text-white px-4 lg:px-6 py-3 rounded-xl font-medium transition-colors duration-200">
-              <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-              <span className="font-semibold text-sm lg:text-base whitespace-nowrap">Last 30 days</span>
-              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            </button>
+      {metadata.ticket_section_closed && (
+        <div className="rounded-xl border border-emerald-200/60 bg-emerald-50/70 dark:border-emerald-500/30 dark:bg-emerald-500/10 p-3 text-sm text-emerald-800 dark:text-emerald-200">
+          <p className="font-semibold">{metadata.ticket_section_closed.notice}</p>
+          {metadata.ticket_section_closed.resolution_summary && (
+            <p className="mt-1 whitespace-pre-wrap">
+              {Array.isArray(metadata.ticket_section_closed.resolution_summary)
+                ? metadata.ticket_section_closed.resolution_summary.join("\n")
+                : metadata.ticket_section_closed.resolution_summary}
+            </p>
+          )}
+        </div>
+      )}
 
-            {/* Training Actions */}
-            <button className="flex items-center gap-3 bg-[#E89F88] hover:bg-[#D68B72] dark:bg-blue-600 dark:hover:bg-blue-500 text-white px-4 lg:px-6 py-3 rounded-xl font-medium transition-colors duration-200">
-              <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-              </svg>
-              <span className="font-semibold text-sm lg:text-base whitespace-nowrap">Train Model</span>
-            </button>
+      {sources.length > 0 && (
+        <div className="space-y-2 text-sm">
+          <p className="text-xs uppercase tracking-wide text-[#6b5f57] dark:text-slate-400">
+            Evidence sources
+          </p>
+          <div className="space-y-2">
+            {sources.map((source, index) => (
+              <div
+                key={sourceKey(source, index)}
+                className="rounded-xl border border-[#F5ECE5] dark:border-slate-600/40 bg-white/80 dark:bg-slate-900/40 p-3"
+              >
+                <p className="text-sm font-medium text-[#333333] dark:text-white">
+                  {source.source ?? `Source ${index + 1}`}
+                </p>
+                <p className="text-xs text-[#6b5f57] dark:text-slate-400">ID: {source.id}</p>
+                {source.preview && (
+                  <p className="mt-2 text-sm leading-relaxed text-[#6b5f57] dark:text-slate-300">
+                    {source.preview}
+                  </p>
+                )}
+              </div>
+            ))}
           </div>
         </div>
+      )}
 
-        {/* Key Metrics Overview */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 lg:gap-6 mb-6 lg:mb-8">
-          {metricsData.map((metric) => (
-            <MetricCard key={metric.id} metric={metric} />
-          ))}
-        </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 lg:gap-8 mb-6 lg:mb-8">
-          {/* Left Column - Learning Activities */}
-          <div className="xl:col-span-2 space-y-6 lg:space-y-8">
-            {/* High-Volume Issue Clusters */}
-            <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:shadow-lg transition-shadow duration-200">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 lg:mb-6">
-                <h2 className="text-xl lg:text-2xl font-semibold text-[#333333] dark:text-white">High-Volume Issue Detection</h2>
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                  <span className="text-xs font-medium text-red-600 dark:text-red-300 bg-red-100 dark:bg-red-500/20 px-2 py-1 rounded-lg">
-                    Learning Opportunity
-                  </span>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-xl bg-red-50 dark:bg-red-500/10 border-l-4 border-red-500/40 hover:bg-red-100 dark:hover:bg-red-500/20 transition-colors duration-200">
-                  <div className="flex items-center gap-4">
-                    <div className="p-2 bg-red-100 dark:bg-red-500/20 rounded-lg flex-shrink-0">
-                      <svg className="w-5 h-5 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.268 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                      </svg>
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-semibold text-[#333333] dark:text-white">Late Delivery Complaints</p>
-                      <p className="text-sm text-[#6b5f57] dark:text-slate-400">Spike detected: +180% in last 48h</p>
-                    </div>
-                  </div>
-                  <div className="text-left sm:text-right flex-shrink-0">
-                    <p className="text-lg font-bold text-red-600 dark:text-red-400">324 tickets</p>
-                    <button className="mt-1 px-3 py-1 text-xs font-medium text-red-600 dark:text-red-300 bg-red-100 dark:bg-red-500/20 hover:bg-red-200 dark:hover:bg-red-500/30 rounded-lg transition-colors duration-200">
-                      Start Learning
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-xl bg-[#F5ECE5]/30 dark:bg-slate-700/20 hover:bg-[#F5ECE5]/50 dark:hover:bg-slate-700/30 transition-colors duration-200">
-                  <div className="flex items-center gap-4">
-                    <div className="p-2 bg-amber-100 dark:bg-amber-500/20 rounded-lg flex-shrink-0">
-                      <svg className="w-5 h-5 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                      </svg>
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-semibold text-[#333333] dark:text-white">Restaurant Menu Issues</p>
-                      <p className="text-sm text-[#6b5f57] dark:text-slate-400">Consistent pattern identified</p>
-                    </div>
-                  </div>
-                  <div className="text-left sm:text-right flex-shrink-0">
-                    <p className="text-lg font-bold text-amber-600 dark:text-amber-400">89 tickets</p>
-                    <button className="mt-1 px-3 py-1 text-xs font-medium text-amber-600 dark:text-amber-300 bg-amber-100 dark:bg-amber-500/20 hover:bg-amber-200 dark:hover:bg-amber-500/30 rounded-lg transition-colors duration-200">
-                      Analyze Pattern
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-xl bg-[#F5ECE5]/30 dark:bg-slate-700/20 hover:bg-[#F5ECE5]/50 dark:hover:bg-slate-700/30 transition-colors duration-200">
-                  <div className="flex items-center gap-4">
-                    <div className="p-2 bg-blue-100 dark:bg-blue-500/20 rounded-lg flex-shrink-0">
-                      <svg className="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.268 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                      </svg>
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-semibold text-[#333333] dark:text-white">Payment Processing Errors</p>
-                      <p className="text-sm text-[#6b5f57] dark:text-slate-400">New integration causing issues</p>
-                    </div>
-                  </div>
-                  <div className="text-left sm:text-right flex-shrink-0">
-                    <p className="text-lg font-bold text-blue-600 dark:text-blue-400">156 tickets</p>
-                    <button className="mt-1 px-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-300 bg-blue-100 dark:bg-blue-500/20 hover:bg-blue-200 dark:hover:bg-blue-500/30 rounded-lg transition-colors duration-200">
-                      Review Solutions
-                    </button>
-                  </div>
-                </div>
-              </div>
+      {router && (
+        <div className="space-y-3 text-sm">
+          <p className="text-xs uppercase tracking-wide text-[#6b5f57] dark:text-slate-400">
+            Routing decision
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-[#F5ECE5] dark:border-slate-600/40 bg-white/70 dark:bg-slate-900/40 p-3">
+              <p className="text-xs uppercase text-[#6b5f57] dark:text-slate-400">Decision</p>
+              <p className="text-sm font-semibold text-[#333333] dark:text-white">
+                {router.decision === "human_agent"
+                  ? "Hand off to human agent"
+                  : "Assistant handles response"}
+              </p>
             </div>
-
-            {/* Pending Solution Approvals */}
-            <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:shadow-lg transition-shadow duration-200">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 lg:mb-6">
-                <h2 className="text-xl lg:text-2xl font-semibold text-[#333333] dark:text-white">AI-Generated Solutions Awaiting Approval</h2>
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-[#E89F88] dark:bg-orange-500 rounded-full animate-pulse"></div>
-                  <span className="text-xs font-medium text-[#E89F88] dark:text-orange-300 bg-orange-100 dark:bg-orange-500/20 px-2 py-1 rounded-lg">
-                    3 Pending Review
-                  </span>
-                </div>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="border-b border-[#F5ECE5] dark:border-slate-600/30">
-                    <tr>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#6b5f57] dark:text-slate-300 uppercase tracking-wider">Issue Category</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#6b5f57] dark:text-slate-300 uppercase tracking-wider">AI Solution</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#6b5f57] dark:text-slate-300 uppercase tracking-wider">Confidence</th>
-                      <th className="text-left py-3 px-4 text-xs font-semibold text-[#6b5f57] dark:text-slate-300 uppercase tracking-wider">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#F5ECE5] dark:divide-slate-600/20">
-                    <tr className="hover:bg-[#F5ECE5]/30 dark:hover:bg-slate-700/30 transition-colors duration-200 bg-orange-50 dark:bg-orange-500/10 border-l-4 border-[#E89F88]/40 dark:border-orange-500/40">
-                      <td className="py-4 px-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 bg-orange-100 dark:bg-orange-500/20 rounded-lg flex-shrink-0">
-                            <svg className="w-4 h-4 text-orange-600 dark:text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-[#333333] dark:text-white font-medium">Late Delivery</p>
-                            <p className="text-xs text-[#6b5f57] dark:text-slate-400">Learned from 47 tickets</p>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-4 px-4 text-[#6b5f57] dark:text-slate-300">
-                        <p className="line-clamp-2 max-w-xs">"Apologize, provide real-time tracking, offer 20% discount for next order"</p>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="flex items-center gap-2">
-                          <div className="w-16 bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-2">
-                            <div className="bg-green-500 h-2 rounded-full transition-all duration-300" style={{width: '96%'}}></div>
-                          </div>
-                          <span className="text-sm font-medium text-green-600 dark:text-green-300">96%</span>
-                        </div>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="flex gap-2">
-                          <button className="px-3 py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors duration-200">
-                            Approve
-                          </button>
-                          <button className="px-3 py-1.5 text-sm font-medium text-[#6b5f57] dark:text-slate-300 bg-[#F5ECE5] dark:bg-slate-700/50 hover:bg-[#E89F88]/20 dark:hover:bg-slate-700 rounded-lg transition-colors duration-200">
-                            Edit
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-
-                    <tr className="hover:bg-[#F5ECE5]/30 dark:hover:bg-slate-700/20 transition-colors duration-200">
-                      <td className="py-4 px-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 bg-blue-100 dark:bg-blue-500/20 rounded-lg flex-shrink-0">
-                            <svg className="w-4 h-4 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                            </svg>
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-[#333333] dark:text-white font-medium">Wrong Order</p>
-                            <p className="text-xs text-[#6b5f57] dark:text-slate-400">Learned from 32 tickets</p>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-4 px-4 text-[#6b5f57] dark:text-slate-300">
-                        <p className="line-clamp-2 max-w-xs">"Process immediate reorder with correct items, full refund for wrong items"</p>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="flex items-center gap-2">
-                          <div className="w-16 bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-2">
-                            <div className="bg-green-500 h-2 rounded-full transition-all duration-300" style={{width: '91%'}}></div>
-                          </div>
-                          <span className="text-sm font-medium text-green-600 dark:text-green-300">91%</span>
-                        </div>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="flex gap-2">
-                          <button className="px-3 py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors duration-200">
-                            Approve
-                          </button>
-                          <button className="px-3 py-1.5 text-sm font-medium text-[#6b5f57] dark:text-slate-300 bg-[#F5ECE5] dark:bg-slate-700/50 hover:bg-[#E89F88]/20 dark:hover:bg-slate-700 rounded-lg transition-colors duration-200">
-                            Edit
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-
-                    <tr className="hover:bg-[#F5ECE5]/30 dark:hover:bg-slate-700/20 transition-colors duration-200">
-                      <td className="py-4 px-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 bg-purple-100 dark:bg-purple-500/20 rounded-lg flex-shrink-0">
-                            <svg className="w-4 h-4 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.268 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                            </svg>
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-[#333333] dark:text-white font-medium">Payment Failed</p>
-                            <p className="text-xs text-[#6b5f57] dark:text-slate-400">Learned from 28 tickets</p>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-4 px-4 text-[#6b5f57] dark:text-slate-300">
-                        <p className="line-clamp-2 max-w-xs">"Guide to update payment method, hold order for 15 minutes, provide alternative payment options"</p>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="flex items-center gap-2">
-                          <div className="w-16 bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-2">
-                            <div className="bg-amber-500 h-2 rounded-full transition-all duration-300" style={{width: '87%'}}></div>
-                          </div>
-                          <span className="text-sm font-medium text-amber-600 dark:text-amber-300">87%</span>
-                        </div>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="flex gap-2">
-                          <button className="px-3 py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors duration-200">
-                            Approve
-                          </button>
-                          <button className="px-3 py-1.5 text-sm font-medium text-[#6b5f57] dark:text-slate-300 bg-[#F5ECE5] dark:bg-slate-700/50 hover:bg-[#E89F88]/20 dark:hover:bg-slate-700 rounded-lg transition-colors duration-200">
-                            Edit
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+            <div className="rounded-xl border border-[#F5ECE5] dark:border-slate-600/40 bg-white/70 dark:bg-slate-900/40 p-3">
+              <p className="text-xs uppercase text-[#6b5f57] dark:text-slate-400">
+                Route to human
+              </p>
+              <p className="text-sm font-semibold text-[#333333] dark:text-white">
+                {router.route_to_human ? "Yes" : "No"}
+              </p>
+            </div>
+            <div className="rounded-xl border border-[#F5ECE5] dark:border-slate-600/40 bg-white/70 dark:bg-slate-900/40 p-3">
+              <p className="text-xs uppercase text-[#6b5f57] dark:text-slate-400">Category</p>
+              <p className="text-sm font-semibold text-[#333333] dark:text-white">
+                {router.classification?.issue_category ?? "—"}
+              </p>
+            </div>
+            <div className="rounded-xl border border-[#F5ECE5] dark:border-slate-600/40 bg-white/70 dark:bg-slate-900/40 p-3">
+              <p className="text-xs uppercase text-[#6b5f57] dark:text-slate-400">Urgency</p>
+              <p className="text-sm font-semibold text-[#333333] dark:text-white">
+                {router.classification?.urgency ?? "—"}
+              </p>
             </div>
           </div>
 
-          {/* Right Column - Performance Metrics */}
-          <div className="space-y-6 lg:space-y-8">
-            {/* Model Performance */}
-            <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:shadow-lg transition-shadow duration-200">
-              <h2 className="text-xl lg:text-2xl font-semibold text-[#333333] dark:text-white mb-4 lg:mb-6">Model Performance</h2>
-
-              <div className="space-y-4 lg:space-y-6">
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <p className="text-[#6b5f57] dark:text-slate-300 font-medium text-sm lg:text-base">BERT Sentiment Analysis</p>
-                    <span className="text-green-600 dark:text-green-400 font-bold">98.3%</span>
-                  </div>
-                  <div className="w-full bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-2">
-                    <div className="bg-green-500 h-2 rounded-full transition-all duration-300" style={{width: '98.3%'}}></div>
-                  </div>
-                  <p className="text-xs text-[#6b5f57] dark:text-slate-400 mt-1">Emotion classification accuracy</p>
-                </div>
-
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <p className="text-[#6b5f57] dark:text-slate-300 font-medium text-sm lg:text-base">Random Forest Classifier</p>
-                    <span className="text-blue-600 dark:text-blue-400 font-bold">94.7%</span>
-                  </div>
-                  <div className="w-full bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-2">
-                    <div className="bg-blue-500 h-2 rounded-full transition-all duration-300" style={{width: '94.7%'}}></div>
-                  </div>
-                  <p className="text-xs text-[#6b5f57] dark:text-slate-400 mt-1">Intent classification accuracy</p>
-                </div>
-
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <p className="text-[#6b5f57] dark:text-slate-300 font-medium text-sm lg:text-base">Vector Similarity</p>
-                    <span className="text-purple-600 dark:text-purple-400 font-bold">91.2%</span>
-                  </div>
-                  <div className="w-full bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-2">
-                    <div className="bg-purple-500 h-2 rounded-full transition-all duration-300" style={{width: '91.2%'}}></div>
-                  </div>
-                  <p className="text-xs text-[#6b5f57] dark:text-slate-400 mt-1">Document retrieval relevance</p>
-                </div>
-
-                <div className="pt-4 border-t border-[#F5ECE5] dark:border-slate-600/30">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[#6b5f57] dark:text-slate-300 font-medium text-sm lg:text-base">Overall System Health</p>
-                    <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                      <span className="text-green-600 dark:text-green-300 font-medium">Excellent</span>
+          {matches.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-wide text-[#6b5f57] dark:text-slate-400">
+                Top knowledge matches
+              </p>
+              <div className="space-y-2">
+                {matches.slice(0, 3).map((match, index) => (
+                  <div
+                    key={matchKey(match, index)}
+                    className="rounded-xl border border-[#F5ECE5] dark:border-slate-600/40 bg-white/80 dark:bg-slate-900/40 p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-[#333333] dark:text-white">
+                          {match.title ?? `Match ${index + 1}`}
+                        </p>
+                        {(match.article_id || match.source_ticket_id) && (
+                          <p className="text-xs text-[#6b5f57] dark:text-slate-400">
+                            {[match.article_id && `Article ${match.article_id}`, match.source_ticket_id && `Ticket ${match.source_ticket_id}`]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </p>
+                        )}
+                      </div>
+                      <span className="text-xs font-semibold text-[#E57252] dark:text-blue-300">
+                        {formatSimilarity(match.similarity)}
+                      </span>
                     </div>
-                  </div>
-                  <p className="text-xs text-[#6b5f57] dark:text-slate-400 mt-1">All models performing within expected parameters</p>
-                </div>
-              </div>
-            </div>
-
-            {/* Recent Activities */}
-            <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-4 sm:p-5 lg:p-6 hover:shadow-lg transition-shadow duration-200">
-              <h2 className="text-xl lg:text-2xl font-semibold text-[#333333] dark:text-white mb-4 lg:mb-6">Recent Learning Activities</h2>
-
-              <div className="space-y-4">
-                {[
-                  {
-                    icon: (
-                      <svg className="w-3 h-3 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                    ),
-                    title: 'Solution approved',
-                    description: 'Late delivery compensation workflow',
-                    time: '2 minutes ago',
-                    color: 'green'
-                  },
-                  {
-                    icon: (
-                      <svg className="w-3 h-3 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                      </svg>
-                    ),
-                    title: 'New pattern detected',
-                    description: 'Payment gateway integration issues',
-                    time: '15 minutes ago',
-                    color: 'blue'
-                  },
-                  {
-                    icon: (
-                      <svg className="w-3 h-3 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                      </svg>
-                    ),
-                    title: 'Knowledge graph updated',
-                    description: '56 new entity relationships mapped',
-                    time: '32 minutes ago',
-                    color: 'purple'
-                  },
-                  {
-                    icon: (
-                      <svg className="w-3 h-3 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.268 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                      </svg>
-                    ),
-                    title: 'Model retrained',
-                    description: 'Sentiment analysis accuracy improved to 98.3%',
-                    time: '1 hour ago',
-                    color: 'amber'
-                  }
-                ].map((activity, index) => (
-                  <div key={index} className="flex items-start gap-3 p-3 rounded-lg bg-[#F5ECE5]/30 dark:bg-slate-700/30 hover:bg-[#F5ECE5]/50 dark:hover:bg-slate-700/50 transition-colors duration-200">
-                    <div className={`p-1.5 bg-${activity.color}-100 dark:bg-${activity.color}-500/20 rounded-lg flex-shrink-0 mt-0.5`}>
-                      {activity.icon}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-[#333333] dark:text-white font-medium">{activity.title}</p>
-                      <p className="text-xs text-[#6b5f57] dark:text-slate-400 truncate">{activity.description}</p>
-                      <p className="text-xs text-[#999999] dark:text-slate-500">{activity.time}</p>
-                    </div>
+                    {match.content && (
+                      <p className="mt-2 text-sm leading-relaxed text-[#6b5f57] dark:text-slate-300 line-clamp-4">
+                        {match.content}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
             </div>
-          </div>
+          )}
         </div>
+      )}
+    </div>
+  );
+};
+
+interface MessageStyles {
+  container: string;
+  bubble: string;
+  label: string;
+  labelColor: string;
+}
+
+function getMessageStyles(role: MessageRole, error?: boolean): MessageStyles {
+  switch (role) {
+    case "assistant":
+      return {
+        container: "self-start",
+        bubble:
+          "max-w-2xl rounded-3xl rounded-tl-xl border border-[#F5ECE5] dark:border-slate-700/50 bg-white/90 dark:bg-slate-900/70 shadow-sm",
+        label: "Assistant",
+        labelColor: "text-[#E57252] dark:text-blue-300",
+      };
+    case "user":
+      return {
+        container: "self-end",
+        bubble:
+          "max-w-xl rounded-3xl rounded-br-xl border border-[#E89F88]/50 bg-[#E89F88]/15 text-[#3F2D25] dark:bg-blue-500/10 dark:text-slate-50",
+        label: "You",
+        labelColor: "text-[#6b5f57] dark:text-slate-300",
+      };
+    default:
+      return {
+        container: "self-center",
+        bubble: error
+          ? "max-w-xl rounded-3xl border border-rose-200 bg-rose-50/80 text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200"
+          : "max-w-xl rounded-3xl border border-slate-200 bg-slate-100/80 text-slate-700 dark:border-slate-600/40 dark:bg-slate-900/60 dark:text-slate-200",
+        label: "System",
+        labelColor: error
+          ? "text-rose-700 dark:text-rose-200"
+          : "text-slate-600 dark:text-slate-300",
+      };
+  }
+}
+
+export const AILearning: React.FC = () => {
+  const [persona, setPersona] = useState<string>(DEFAULT_PERSONA);
+  const [userId, setUserId] = useState<string>("demo_user");
+  const [message, setMessage] = useState<string>("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ConsoleMessage[]>([]);
+  const [isSending, setIsSending] = useState<boolean>(false);
+  const [activeController, setActiveController] = useState<AbortController | null>(null);
+
+  const { personas, isLoading, error: personasError, refresh } = usePersonas([
+    DEFAULT_PERSONA,
+  ]);
+
+  const personaOptions = useMemo(() => {
+    const unique = new Set<string>();
+    const result: string[] = [];
+    personas.forEach((item) => {
+      const trimmed = item.trim();
+      if (trimmed && !unique.has(trimmed)) {
+        unique.add(trimmed);
+        result.push(trimmed);
+      }
+    });
+    if (!unique.has(DEFAULT_PERSONA)) {
+      result.unshift(DEFAULT_PERSONA);
+    }
+    return result;
+  }, [personas]);
+
+  useEffect(() => {
+    if (!persona && personaOptions.length) {
+      setPersona(personaOptions[0]);
+    }
+  }, [persona, personaOptions]);
+
+  useEffect(
+    () => () => {
+      activeController?.abort();
+    },
+    [activeController],
+  );
+
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  const handleSend = useCallback(async () => {
+    if (isSending) {
+      return;
+    }
+    const trimmedMessage = message.trim();
+    const trimmedPersona = persona.trim();
+    const trimmedUser = userId.trim();
+
+    if (!trimmedMessage) {
+      setFormError("Enter a message for the assistant.");
+      return;
+    }
+    if (!trimmedPersona) {
+      setFormError("Choose a persona (e.g. ol_rpi).");
+      return;
+    }
+    if (!trimmedPersona.startsWith("ol_")) {
+      setFormError("Persona IDs should follow the ol_* format.");
+      return;
+    }
+    if (!trimmedUser) {
+      setFormError("Provide a user identifier so we can route context.");
+      return;
+    }
+
+    setFormError(null);
+
+    const controller = new AbortController();
+    setActiveController(controller);
+
+    const outbound: ConsoleMessage = {
+      id: createMessageId("user"),
+      role: "user",
+      content: trimmedMessage,
+      timestamp: new Date().toISOString(),
+    };
+
+    setMessages((prev) => [...prev, outbound]);
+    setMessage("");
+    setIsSending(true);
+
+    try {
+      const response = await sendChatMessage(
+        {
+          persona_name: trimmedPersona,
+          user_id: trimmedUser,
+          message: trimmedMessage,
+        },
+        controller.signal,
+      );
+
+      const inbound: ConsoleMessage = {
+        id: createMessageId("assistant"),
+        role: "assistant",
+        content: response.message,
+        timestamp: new Date().toISOString(),
+        metadata: response,
+      };
+
+      setMessages((prev) => [...prev, inbound]);
+    } catch (error) {
+      const fallback =
+        error instanceof Error
+          ? error.message
+          : "Assistant is unavailable right now.";
+      const systemMessage: ConsoleMessage = {
+        id: createMessageId("system"),
+        role: "system",
+        content: fallback,
+        timestamp: new Date().toISOString(),
+        error: true,
+      };
+      setMessages((prev) => [...prev, systemMessage]);
+    } finally {
+      setIsSending(false);
+      setActiveController(null);
+    }
+  }, [isSending, message, persona, userId]);
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void handleSend();
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      void handleSend();
+    }
+  };
+
+  const handleClearConversation = () => {
+    activeController?.abort();
+    setMessages([]);
+    setFormError(null);
+  };
+
+  const handleRefreshPersonas = async () => {
+    await refresh();
+  };
+
+  return (
+    <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(232,159,136,0.05),transparent)] dark:bg-[radial-gradient(circle_at_20%_40%,rgba(120,119,198,0.15),transparent)] opacity-60" />
+      <div className="relative z-10 p-4 sm:p-6 lg:p-8 space-y-6">
+        <header className="space-y-2">
+          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-semibold text-[#333333] dark:text-white tracking-tight">
+            Assistant Chat Console
+          </h1>
+          <p className="text-[#6b5f57] dark:text-slate-400 text-base lg:text-lg max-w-3xl">
+            Talk to personas, review the router&apos;s decisions, and inspect the evidence the assistant uses for every answer.
+          </p>
+        </header>
+
+        <section className="grid gap-6 lg:grid-cols-[minmax(0,380px),1fr]">
+          <div className="space-y-6">
+            <div className="rounded-3xl border border-[#F5ECE5] dark:border-slate-700/60 bg-white/80 dark:bg-slate-900/60 backdrop-blur p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-[#333333] dark:text-white">
+                Conversation setup
+              </h2>
+              <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
+                Personas drive tone and knowledge. Provide a user ID to isolate history and routing.
+              </p>
+
+              <div className="mt-5 space-y-5 text-sm">
+                <label className="block space-y-2">
+                  <span className="font-medium text-[#6b5f57] dark:text-slate-300">
+                    Persona ID
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      className="flex-1 rounded-2xl border border-[#F5ECE5] dark:border-slate-700/50 bg-white/80 dark:bg-slate-950/40 px-4 py-3 text-sm text-[#333333] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 dark:focus:ring-blue-500/40"
+                      placeholder="ol_rpi"
+                      value={persona}
+                      onChange={(event) => setPersona(event.target.value)}
+                      list={personaOptions.length ? "chat-persona-options" : undefined}
+                      autoComplete="off"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleRefreshPersonas}
+                      className="inline-flex items-center gap-2 rounded-xl border border-[#F5ECE5] dark:border-slate-700/40 bg-white/70 dark:bg-slate-900/40 px-3 py-2 font-semibold text-[#6b5f57] dark:text-slate-200 transition hover:bg-[#F5ECE5]/60 dark:hover:bg-slate-800/60"
+                      disabled={isLoading}
+                    >
+                      {isLoading ? (
+                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#E89F88]/40 border-t-[#E89F88]" />
+                      ) : (
+                        <svg
+                          className="h-4 w-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M4 4v6h6M20 20v-6h-6"
+                          />
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M5 19A9 9 0 0119 5"
+                          />
+                        </svg>
+                      )}
+                      <span className="hidden sm:inline">Refresh</span>
+                    </button>
+                  </div>
+                  <p className="text-xs text-[#6b5f57] dark:text-slate-400">
+                    {isLoading
+                      ? "Syncing personas…"
+                      : personasError
+                      ? "We couldn’t sync personas. Retry or type an ID manually."
+                      : personaOptions.length
+                      ? `Choose from ${personaOptions.length} personas or type any ol_* ID.`
+                      : "Type a persona ID that begins with ol_."}
+                  </p>
+                  {personaOptions.length > 0 && (
+                    <datalist id="chat-persona-options">
+                      {personaOptions.map((option) => (
+                        <option key={option} value={option} />
+                      ))}
+                    </datalist>
+                  )}
+                </label>
+
+                <label className="block space-y-2">
+                  <span className="font-medium text-[#6b5f57] dark:text-slate-300">
+                    User identifier
+                  </span>
+                  <input
+                    className="w-full rounded-2xl border border-[#F5ECE5] dark:border-slate-700/50 bg-white/80 dark:bg-slate-950/40 px-4 py-3 text-sm text-[#333333] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 dark:focus:ring-blue-500/40"
+                    placeholder="demo_user"
+                    value={userId}
+                    onChange={(event) => setUserId(event.target.value)}
+                  />
+                  <p className="text-xs text-[#6b5f57] dark:text-slate-400">
+                    Use a consistent ID to keep conversation context isolated.
+                  </p>
+                </label>
+              </div>
+
+              <div className="mt-6 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleClearConversation}
+                  className="inline-flex items-center gap-2 rounded-xl border border-[#F5ECE5] dark:border-slate-700/50 bg-white/80 dark:bg-slate-900/40 px-4 py-2 text-sm font-semibold text-[#6b5f57] dark:text-slate-200 transition hover:bg-[#F5ECE5]/50 dark:hover:bg-slate-800/60"
+                  disabled={messages.length === 0}
+                >
+                  <svg
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M3 6h18M8 6v12m8-12v12M5 6l1 14a2 2 0 002 2h8a2 2 0 002-2l1-14"
+                    />
+                  </svg>
+                  Clear
+                </button>
+                {formError && (
+                  <p className="text-sm font-semibold text-rose-600 dark:text-rose-300">
+                    {formError}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-[#F5ECE5] dark:border-slate-700/60 bg-white/80 dark:bg-slate-900/60 backdrop-blur shadow-sm flex flex-col">
+            <div className="border-b border-[#F5ECE5] dark:border-slate-700/40 px-6 py-4">
+              <p className="text-sm font-semibold text-[#333333] dark:text-white">
+                Conversation
+              </p>
+              <p className="text-xs text-[#6b5f57] dark:text-slate-400">
+                Assistant answers stream here. Press Ctrl+Enter to send quickly.
+              </p>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+              {messages.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-sm text-[#6b5f57] dark:text-slate-400">
+                  <div className="grid h-10 w-10 place-items-center rounded-full border border-dashed border-[#E89F88]/60 dark:border-blue-500/40 text-[#E57252] dark:text-blue-300">
+                    <svg
+                      className="h-5 w-5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M12 11c0-3.866 3.582-7 8-7M4 4h8m0 0v8m0-8L5.41 12.59"
+                      />
+                    </svg>
+                  </div>
+                  <div className="max-w-sm space-y-1">
+                    <p className="font-semibold text-[#333333] dark:text-white">
+                      Start a chat
+                    </p>
+                    <p>
+                      Ask the assistant to resolve a customer question, summarize a ticket, or escalate to an agent.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  {messages.map((entry) => {
+                    const styles = getMessageStyles(entry.role, entry.error);
+                    return (
+                      <div
+                        key={entry.id}
+                        className={`${styles.container} flex flex-col gap-2`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className={`text-xs font-semibold ${styles.labelColor}`}>
+                            {styles.label}
+                          </span>
+                          <span className="text-[11px] uppercase tracking-wide text-[#9B8B82] dark:text-slate-500">
+                            {formatTimestamp(entry.timestamp)}
+                          </span>
+                        </div>
+                        <div className={`${styles.bubble} px-5 py-4`}>
+                          <p className="text-sm leading-relaxed text-[#3f2d25] dark:text-slate-100 whitespace-pre-wrap">
+                            {entry.content}
+                          </p>
+                          {entry.role === "assistant" && (
+                            <AssistantMetadata metadata={entry.metadata} />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div ref={scrollRef} />
+                </div>
+              )}
+            </div>
+
+            <form onSubmit={handleSubmit} className="border-t border-[#F5ECE5] dark:border-slate-700/40 px-6 py-5 space-y-4">
+              <label className="block">
+                <span className="sr-only">Message</span>
+                <textarea
+                  className="w-full min-h-[120px] rounded-2xl border border-[#F5ECE5] dark:border-slate-700/50 bg-white dark:bg-slate-950/40 px-4 py-3 text-sm text-[#333333] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 dark:focus:ring-blue-500/40"
+                  placeholder="Draft your message for the assistant…"
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  onKeyDown={handleKeyDown}
+                />
+              </label>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs text-[#6b5f57] dark:text-slate-400">
+                  Tip: Use Ctrl + Enter to send.
+                </p>
+                <button
+                  type="submit"
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-[#E89F88] px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-[#D97D61] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 disabled:cursor-not-allowed disabled:bg-[#E89F88]/60"
+                  disabled={isSending}
+                >
+                  {isSending ? (
+                    <>
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-white" />
+                      Sending…
+                    </>
+                  ) : (
+                    <>
+                      <svg
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                        />
+                      </svg>
+                      Send message
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
       </div>
     </div>
   );

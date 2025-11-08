@@ -4,7 +4,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   Database,
-  Brain,
+  Bot,
   Plug,
   BarChart3,
   Settings,
@@ -23,7 +23,7 @@ const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Knowledge Base', href: '/knowledge', icon: Database },
   { name: 'Tickets', href: '/tickets', icon: MessageSquare },
-  { name: 'AI Learning', href: '/ai-learning', icon: Brain },
+  { name: 'Assistant Chat', href: '/ai-learning', icon: Bot },
   { name: 'FAQ Manager', href: '/faq-manager', icon: FileQuestion }, // Add FAQ Manager
   { name: 'Integrations', href: '/integrations', icon: Plug },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
