@@ -10,3 +10,4 @@ transitions
 requests
 scikit-learn
 python-dateutil
+pypdf

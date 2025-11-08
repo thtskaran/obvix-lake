@@ -7,7 +7,7 @@ import json
 import threading
 import re
 from xml.etree import ElementTree as ET
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, request, jsonify
@@ -31,6 +31,7 @@ from services.glpi_service import (
     GLPISyncService,
     ResolutionExtractor,
 )
+from pypdf import PdfReader
 from services.knowledge_pipeline import KnowledgePipeline
 from services.rag_pipeline import HybridRAGPipeline
 from services.ticket_router import TicketRouter
@@ -112,6 +113,7 @@ RAG_SEMANTIC_WEIGHT = float(os.environ.get("RAG_SEMANTIC_WEIGHT", "0.60"))
 
 PERSONA_FOLDER_LOCK = threading.Lock()
 PERSONA_FOLDER_INDEX: Dict[str, str] = {}
+PDF_MIME_TYPES = {"application/pdf"}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GOOGLE_SERVICE_ACCOUNT_FILE = (
@@ -203,10 +205,41 @@ def fetch_plain_text(file_id: str, mime_type: str) -> str:
         done = False
         while not done:
             _, done = downloader.next_chunk()
-        return fh.getvalue().decode("utf-8", errors="ignore")
+        binary_data = fh.getvalue()
+        if "google-apps" in mime_type:
+            return binary_data.decode("utf-8", errors="ignore")
+        if mime_type in PDF_MIME_TYPES:
+            pdf_text = _extract_pdf_text(binary_data, file_id)
+            if pdf_text:
+                return pdf_text
+        return binary_data.decode("utf-8", errors="ignore")
     except Exception as e:
         logging.error(f"Failed to fetch text for file {file_id}: {e}")
         return ""
+
+
+def _extract_pdf_text(data: bytes, file_id: str) -> str:
+    if not data:
+        return ""
+    try:
+        reader = PdfReader(io.BytesIO(data))
+    except Exception as exc:
+        logging.warning("Unable to read PDF %s: %s", file_id, exc)
+        return ""
+    pages: List[str] = []
+    for idx, page in enumerate(reader.pages):
+        try:
+            text = page.extract_text() or ""
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning("Failed to extract text from PDF %s page %s: %s", file_id, idx, exc)
+            text = ""
+        cleaned = text.replace("\u0000", "").strip()
+        if cleaned:
+            pages.append(cleaned)
+    combined = "\n\n".join(pages).strip()
+    if not combined:
+        logging.info("PDF %s produced no extractable text; skipping.", file_id)
+    return combined
 
 
 def _parse_key_value_doc(text_content: str) -> Dict[str, Any]:
@@ -620,6 +653,7 @@ def sync_drive_personas_task():
             _update_persona_folder_cache(persona_folders)
             for persona_folder in persona_folders:
                 persona_name = persona_folder["name"].lower().replace(" ", "_")
+                current_file_ids: Set[str] = set()
                 files_resp = (
                     drive_service.files()
                     .list(
@@ -635,12 +669,26 @@ def sync_drive_personas_task():
                         continue
                     file_id = file["id"]
                     modified_time = file["modifiedTime"]
+                    current_file_ids.add(str(file_id))
                     if file_id not in processed_files or processed_files.get(file_id) != modified_time:
                         logging.info(f"Processing '{file['name']}' for persona '{persona_name}'...")
                         text = fetch_plain_text(file_id, file["mimeType"])
                         if text:
                             upsert_persona_document(persona_name, file_id, file["name"], text)
                             processed_files[file_id] = modified_time
+                persona_collection = db[f"{PERSONA_COLLECTION_PREFIX}{persona_name}"]
+                existing_cursor = persona_collection.find({"file_id": {"$exists": True}}, {"file_id": 1})
+                existing_ids = {str(doc.get("file_id")) for doc in existing_cursor if doc.get("file_id")}
+                stale_ids = existing_ids - current_file_ids
+                if stale_ids:
+                    logging.info(
+                        "Removing %d stale documents for persona '%s' (files deleted from Drive)",
+                        len(stale_ids),
+                        persona_name,
+                    )
+                    persona_collection.delete_many({"file_id": {"$in": list(stale_ids)}})
+                    for stale_id in stale_ids:
+                        processed_files.pop(stale_id, None)
         except Exception as e:
             logging.error(f"Error during sync loop: {e}")
 
