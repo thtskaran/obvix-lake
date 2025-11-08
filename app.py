@@ -33,8 +33,7 @@ from services.rag_pipeline import (
     parse_self_rag_tokens,
 )
 
-# FSM Import
-from fsm import initialize_fsm_for_user
+# FSM removed: system now uses KB + router decisions only (no FSM)
 
 # ==============================================================================
 # CONFIGURATION
@@ -595,29 +594,22 @@ def construct_support_messages(
     history,
     knowledge_block,
     common_phrases,
-    fsm_state,
     user_profile: Dict[str, Any],
     persona_name: str,
     router_payload: Optional[Dict[str, Any]] = None,
 ):
-    phase_instructions = {
-        "Phase0_Greeting": "Greet the user, state your persona explicitly, and ask what issue they are facing.",
-        "Phase1_IssueIntake": "Capture clear problem details (device, location, impact, error codes). Ask one focused question if anything is missing.",
-        "Phase2_Diagnostics": "Walk the user through diagnostic checks step-by-step. Reference prior info so you do not repeat questions.",
-        "Phase3_SolutionProposal": "Present resolution steps using available knowledge. Cite the most relevant snippet in natural language.",
-        "Phase4_Confirmation": "Confirm whether the solution worked. Offer a fallback or next diagnostic only if needed.",
-        "Phase5_Closing": "Summarize what was done and set expectations for monitoring or follow-up.",
-    }
-    instruction = phase_instructions.get(fsm_state, "Stay helpful, concise, and grounded in factual knowledge.")
+    # FSM removed: messages are driven by persona config + KB retrieval + router.
+    instruction = (
+        "Answer the user's query using ONLY the provided knowledge snippets. "
+        "If the knowledge is insufficient, say you don't have enough information and recommend escalation."
+    )
     memory = build_user_memory_snippet(user_profile)
     tone_pref = user_profile.get("tone_preference", "")
     tone_obs = (user_profile.get("tone_observed") or "neutral")
     agent_name = resolve_model_name(model_settings, persona_name)
     router_context = build_router_context(router_payload)
-
     system_prompt = f"""
 You are "{agent_name}", {model_settings.get('model_identity', 'a senior support specialist')} for this persona.
-Current FSM state: {fsm_state}
 Objective: {instruction}
 
 Constraints:
@@ -1025,13 +1017,9 @@ def chat_handler():
     user_profile = db[USER_PROFILES_COL].find_one({"user_id": user_id}) or {}
     user_profile["user_id"] = user_id
     user_profile["message_count"] = user_profile.get("message_count", 0) + 1
-    fsm = initialize_fsm_for_user(user_profile)
 
-    if getattr(fsm, "state", None) in FINAL_STATE_RESPONSES:
-        response_content = FINAL_STATE_RESPONSES.get(fsm.state, FINAL_STATE_RESPONSES['FinalState_FollowUp'])
-        save_message_to_history(user_id, "assistant", response_content)
-        return jsonify({"message": response_content, "fsm_state": fsm.state}), 200
-
+    # No FSM: infer tone and persist message_count only. Flow decisions are
+    # governed by RAG and the ticket router (KB-driven multi-persona behavior).
     try:
         tone_info = infer_conversation_tone(history)
         db[USER_PROFILES_COL].update_one(
@@ -1045,7 +1033,7 @@ def chat_handler():
 
     db[USER_PROFILES_COL].update_one(
         {"user_id": user_id},
-        {"$inc": {"message_count": 1}, "$set": {"fsm_state": fsm.state}},
+        {"$inc": {"message_count": 1}},
         upsert=True
     )
 
@@ -1089,7 +1077,7 @@ def chat_handler():
 
         glpi_ticket_id = None
         if should_escalate:
-            fsm.escalate()
+            # Escalation decision taken based on RAG/router; no FSM state change.
             reason_text = "; ".join(escalation_reasons)
             pending_reply = FINAL_STATE_RESPONSES['FinalState_Escalated']
             glpi_ticket_id = record_escalation_case(
@@ -1107,17 +1095,16 @@ def chat_handler():
                 response_content += f" Reference ticket #{glpi_ticket_id}."
             persist_rag_metrics(user_id, persona_name, rag_context, True, reason_text)
         elif router_payload and router_payload.get("decision") == "auto_resolved" and router_payload.get("resolution_proposal"):
-            fsm.mark_resolved()
+            # Auto-resolve suggested by router: return proposed resolution directly.
             response_content = "Here's what typically fixes this scenario:\n" + router_payload["resolution_proposal"]
             persist_rag_metrics(user_id, persona_name, rag_context, False, None)
         else:
-            fsm.progress()
+            # Normal respond flow: build LLM messages without any FSM state.
             llm_messages = construct_support_messages(
                 model_settings,
                 history,
                 knowledge_block,
                 common_phrases,
-                fsm.state,
                 user_profile,
                 persona_name,
                 router_payload,
@@ -1159,7 +1146,7 @@ def chat_handler():
                 )
 
             if late_escalation_reason:
-                fsm.escalate()
+                # If LLM or grounding indicates a late escalation, record it. No FSM involved.
                 glpi_ticket_id = record_escalation_case(
                     user_id,
                     persona_name,
@@ -1180,12 +1167,13 @@ def chat_handler():
                 persist_rag_metrics(user_id, persona_name, rag_context, False, None)
 
         save_message_to_history(user_id, "assistant", response_content)
+        # Persist assistant reply timestamp/meta but do not use FSM state.
         db[USER_PROFILES_COL].update_one(
             {"user_id": user_id},
-            {"$set": {"fsm_state": fsm.state}},
+            {"$set": {"last_bot_reply": datetime.now(timezone.utc)}},
             upsert=True
         )
-        payload = {"message": response_content, "fsm_state": fsm.state}
+        payload = {"message": response_content}
         if router_payload:
             payload["router"] = router_payload
         if glpi_ticket_id:

@@ -351,7 +351,7 @@ class HybridRAGPipeline:
         confidence = "HIGH"
         response_prefix = ""
 
-        if avg_similarity < 0.60 or max_similarity < 0.65:
+        if avg_similarity < 0.40 or max_similarity < 0.45:
             decision = "escalate"
             reason = "Low semantic similarity across retrieved chunks"
 
