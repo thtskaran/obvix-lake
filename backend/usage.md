@@ -33,10 +33,25 @@ It continually enriches a lightweight CRM / ticket profile in MongoDB and uses t
     {"id": "kb_doc_001", "source": "ticket_12345", "preview": "Reboot firewall and reapply policy"}
   ],
   "glpi_ticket_id": "24857",            // present only when escalated
-  "router": { ... }                       // ticket router payload when available (includes route_to_human)
+  "router": { ... },                      // ticket router payload when available (includes route_to_human)
+  "ticket_forwarded": true,               // returned when the assistant routes the message directly into an open ticket
+  "active_ticket": {                      // snapshot of the active ticket state (present when ticket_forwarded is true)
+    "ticket_id": "24857",
+    "status": "open",
+    "last_forwarded_at": "2025-11-08T21:58:12.941Z",
+    "forwarded_via_glpi": true
+  },
+  "ticket_section_closed": {              // emitted on the first message after a ticket is resolved
+    "ticket_id": "24857",
+    "closed_at": "2025-11-08T20:12:04.003Z",
+    "notice": "Support ticket #24857 has been marked resolved. I'm ready to assist you directly again.",
+    "resolution_summary": ["Replaced the faulty transceiver", "Validated signal levels post replacement"]
+  }
 }
 ```
 
+
+When a conversation already has an open ticket, `/chat` stops invoking the LLM and instead forwards the user's message as a ticket follow-up. The response echoes an acknowledgement, sets `ticket_forwarded` to `true`, and includes the `active_ticket` snapshot so clients can surface ticket status. Once GLPI marks the ticket as resolved, the next `/chat` response carries `ticket_section_closed` with a human-readable notice and resolution metadata, signalling that the assistant is back in control until a new ticket is raised.
 `confidence` reflects the hybrid retrieval + grounding gates (HIGH or LOW). `escalation_deferred` is `true` when the assistant is intentionally continuing troubleshooting before involving a human, and `assist_attempts_with_kb` tracks how many KB-backed replies have happened in the current window. `sources` enumerates every chunk cited in the response so downstream clients can build inline references. When the validation gates fail, `glpi_ticket_id` is returned after the deterministic handoff to GLPI.
 
 **GET `/personas`**

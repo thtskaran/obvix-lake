@@ -706,8 +706,12 @@ def start_background_threads():
 # HISTORY
 # ==============================================================================
 def save_message_to_history(user_id: str, role: str, content: str):
+    if role == "user" and content:
+        stored_content = f"USER: {content}"
+    else:
+        stored_content = content
     db[CHAT_HISTORY_COL].insert_one(
-        {"user_id": user_id, "role": role, "content": content, "timestamp": datetime.now()}
+        {"user_id": user_id, "role": role, "content": stored_content, "timestamp": datetime.now()}
     )
 
 
@@ -1116,14 +1120,15 @@ def _build_support_agent_tools(
             escalation_reason=reason,
             assistant_reply=summary,
         )
+        ticket_id_str = str(ticket_id) if ticket_id is not None else None
         conversation_state["escalated"] = True
-        conversation_state["glpi_ticket_id"] = ticket_id
+        conversation_state["glpi_ticket_id"] = ticket_id_str
         conversation_state["escalation_reason"] = reason
         tool_state["ticket"] = {
-            "ticket_id": ticket_id,
+            "ticket_id": ticket_id_str,
             "reason": reason,
         }
-        return {"status": "ok", "ticket_id": ticket_id, "reason": reason}
+        return {"status": "ok", "ticket_id": ticket_id_str, "reason": reason}
 
     def _profile_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
         fields = arguments.get("fields") or []
@@ -1260,6 +1265,203 @@ def _format_transcript(
     return "\n".join(lines)
 
 
+def _ticket_lookup_values(ticket_id: Any) -> List[Any]:
+    if ticket_id is None:
+        return []
+    values: List[Any] = []
+    for candidate in (ticket_id, str(ticket_id)):
+        if candidate not in values:
+            values.append(candidate)
+    if isinstance(ticket_id, str):
+        try:
+            int_candidate = int(ticket_id)
+        except (TypeError, ValueError):
+            int_candidate = None
+        else:
+            if int_candidate not in values:
+                values.append(int_candidate)
+    return values
+
+
+def _find_ticket_resolution(ticket_id: Any) -> Optional[Dict[str, Any]]:
+    lookup_values = _ticket_lookup_values(ticket_id)
+    if not lookup_values:
+        return None
+    return db[GLPI_RESOLUTIONS_COL].find_one({"ticket_id": {"$in": lookup_values}})
+
+
+def _parse_possible_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        iso_candidate = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(iso_candidate)
+        except ValueError:
+            parsed = None
+        if parsed is None:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    parsed = None
+            if parsed is None:
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
+
+
+def _fetch_glpi_ticket_status(ticket_id: Any) -> Optional[Dict[str, Any]]:
+    if not glpi_client or ticket_id is None:
+        return None
+    lookup_id: Any = ticket_id
+    try:
+        lookup_id = int(str(ticket_id))
+    except (TypeError, ValueError):
+        lookup_id = ticket_id
+    try:
+        ticket = glpi_client.get_ticket(lookup_id, include_details=False)
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.warning("Failed to fetch GLPI ticket %s status: %s", ticket_id, exc)
+        return None
+    if not ticket:
+        return None
+    status_value = ticket.get("status")
+    status_int: Optional[int]
+    try:
+        status_int = int(status_value) if status_value is not None else None
+    except (TypeError, ValueError):
+        status_int = None
+    status_text = str(status_value).lower() if status_value is not None else ""
+    closed_val = ticket.get("closedate") or ticket.get("solvedate")
+    closed_at = _parse_possible_datetime(closed_val)
+    closed = False
+    if status_int is not None:
+        closed = status_int >= 5
+    elif status_text in {"closed", "solved", "resolved", "done"}:
+        closed = True
+    if closed and closed_at is None:
+        closed_at = datetime.now(timezone.utc)
+    return {
+        "closed": closed,
+        "status": status_value,
+        "closed_at": closed_at,
+        "raw_ticket": ticket,
+    }
+
+
+def _append_ticket_followup(user_id: str, persona_name: str, ticket_id: Any, message: str) -> None:
+    if ticket_id is None:
+        return
+    ticket_id_str = str(ticket_id)
+    now_ts = datetime.now(timezone.utc)
+    update_doc = {
+        "$set": {"updated_at": now_ts},
+        "$push": {
+            "customer_updates": {
+                "timestamp": now_ts,
+                "user_id": user_id,
+                "message": message,
+            }
+        },
+    }
+    try:
+        db[SUPPORT_ESCALATIONS_COL].update_one(
+            {"user_id": user_id, "persona": persona_name, "ticket_id": ticket_id_str},
+            update_doc,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.warning("Failed to append ticket follow-up for %s/%s: %s", user_id, ticket_id, exc)
+
+
+def _forward_chat_to_ticket(
+    *,
+    user_id: str,
+    persona_name: str,
+    ticket_entry: Dict[str, Any],
+    user_message: str,
+) -> Dict[str, Any]:
+    ticket_id = ticket_entry.get("ticket_id")
+    message_text = (user_message or "").strip()
+    if not message_text:
+        message_text = "[Customer sent an update without additional text]"
+
+    forwarded = False
+    forward_error: Optional[str] = None
+    if glpi_escalation_manager and ticket_id:
+        try:
+            forwarded = glpi_escalation_manager.send_customer_response(ticket_id, message_text)
+        except Exception as exc:  # pragma: no cover - defensive
+            forward_error = str(exc)
+            logging.error("Failed to forward customer update to GLPI ticket %s: %s", ticket_id, exc)
+
+    _append_ticket_followup(user_id, persona_name, ticket_id, message_text)
+
+    now_ts = datetime.now(timezone.utc)
+    db[USER_PROFILES_COL].update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                f"active_tickets.{persona_name}.last_forwarded_at": now_ts,
+                f"active_tickets.{persona_name}.status": "open",
+            }
+        },
+        upsert=True,
+    )
+    ticket_entry["last_forwarded_at"] = now_ts
+
+    if ticket_id:
+        ticket_display = f"ticket #{ticket_id}"
+    else:
+        ticket_display = "the support ticket in progress"
+
+    if forwarded:
+        ack_message = (
+            f"Thanks for the update! I've added it to {ticket_display}. "
+            "Our specialists will follow up soon."
+        )
+    else:
+        if glpi_escalation_manager and ticket_id:
+            ack_message = (
+                f"Your message has been queued for {ticket_display}. "
+                "I'll make sure the support team sees it."
+            )
+        else:
+            ack_message = (
+                "I've recorded your update for the open support ticket. "
+                "We'll share it with a human specialist shortly."
+            )
+    if forward_error:
+        ack_message += " (There was a temporary issue sending it upstream; the team has been notified.)"
+
+    save_message_to_history(user_id, "assistant", ack_message)
+
+    payload: Dict[str, Any] = {
+        "message": ack_message,
+        "confidence": "LOW",
+        "escalation_deferred": False,
+        "assist_attempts_with_kb": 0,
+        "ticket_forwarded": True,
+        "ticket_status": "open",
+        "sources": [],
+    }
+    if ticket_id:
+        payload["glpi_ticket_id"] = ticket_id
+        payload["active_ticket"] = {
+            "ticket_id": ticket_id,
+            "status": "open",
+            "last_forwarded_at": now_ts.isoformat(),
+            "forwarded_via_glpi": forwarded,
+        }
+    return payload
+
+
 def record_escalation_case(
     user_id: str,
     persona_name: str,
@@ -1310,10 +1512,11 @@ def record_escalation_case(
         except Exception as exc:
             logging.error("GLPI fallback ticket failed: %s", exc)
 
+    ticket_id_str = str(ticket_id) if ticket_id is not None else None
     doc = {
         "user_id": user_id,
         "persona": persona_name,
-        "ticket_id": ticket_id,
+        "ticket_id": ticket_id_str,
         "escalation_reason": reason_text,
         "router_classification": classification,
         "router_payload": router_payload,
@@ -1331,9 +1534,28 @@ def record_escalation_case(
         "created_at": datetime.now(timezone.utc),
     }
     db[SUPPORT_ESCALATIONS_COL].insert_one(doc)
+    now_ts = datetime.now(timezone.utc)
+    active_ticket_doc = {
+        "ticket_id": ticket_id_str,
+        "status": "open",
+        "opened_at": now_ts,
+        "escalation_reason": reason_text,
+    }
+    if classification:
+        active_ticket_doc["classification"] = classification
+    if rag_metrics:
+        active_ticket_doc["rag_metrics"] = rag_metrics
+    profile_update: Dict[str, Any] = {
+        "$set": {
+            "last_support_handoff": now_ts,
+            "last_glpi_ticket_id": ticket_id_str,
+        }
+    }
+    if ticket_id_str is not None:
+        profile_update["$set"][f"active_tickets.{persona_name}"] = active_ticket_doc
     db[USER_PROFILES_COL].update_one(
         {"user_id": user_id},
-        {"$set": {"last_support_handoff": datetime.now(timezone.utc), "last_glpi_ticket_id": ticket_id}},
+        profile_update,
         upsert=True,
     )
     return ticket_id
@@ -1620,6 +1842,75 @@ def chat_handler():
         upsert=True
     )
 
+    active_tickets_raw = user_profile.get("active_tickets")
+    active_tickets = active_tickets_raw if isinstance(active_tickets_raw, dict) else {}
+    user_profile["active_tickets"] = active_tickets
+    active_ticket_entry = active_tickets.get(persona_name)
+    ticket_section_closed: Optional[Dict[str, Any]] = None
+
+    if active_ticket_entry:
+        ticket_id = active_ticket_entry.get("ticket_id")
+        resolution_doc = _find_ticket_resolution(ticket_id)
+        status_info = None if resolution_doc else _fetch_glpi_ticket_status(ticket_id)
+        is_closed = bool(resolution_doc) or bool(status_info and status_info.get("closed"))
+        if is_closed:
+            closed_val = (
+                resolution_doc.get("closed_at") if resolution_doc else status_info.get("closed_at")
+            )
+            closed_dt = _parse_possible_datetime(closed_val)
+            closed_recorded = closed_dt or datetime.now(timezone.utc)
+            ticket_display = str(ticket_id) if ticket_id else "unknown"
+            notice_message = (
+                f"Support ticket #{ticket_display} has been marked resolved. I'm ready to assist you directly again."
+            )
+            save_message_to_history(user_id, "assistant", notice_message)
+            history.append({"role": "assistant", "content": notice_message})
+            update_ops = {
+                "$unset": {f"active_tickets.{persona_name}": ""},
+                "$set": {
+                    "last_ticket_closed_id": str(ticket_id) if ticket_id else None,
+                    "last_ticket_closed_at": closed_recorded,
+                },
+            }
+            if status_info and status_info.get("status") is not None:
+                update_ops["$set"]["last_ticket_status"] = status_info.get("status")
+            db[USER_PROFILES_COL].update_one({"user_id": user_id}, update_ops, upsert=True)
+            active_tickets.pop(persona_name, None)
+            user_profile["active_tickets"] = active_tickets
+            ticket_section_closed = {"ticket_id": str(ticket_id) if ticket_id else None, "notice": notice_message}
+            if closed_dt:
+                ticket_section_closed["closed_at"] = closed_dt.isoformat()
+            elif isinstance(closed_val, str):
+                ticket_section_closed["closed_at"] = closed_val
+            else:
+                ticket_section_closed["closed_at"] = closed_recorded.isoformat()
+            if status_info and status_info.get("status") is not None:
+                ticket_section_closed["status"] = status_info.get("status")
+            if resolution_doc:
+                resolution_summary = resolution_doc.get("solution_steps") or resolution_doc.get("problem_summary")
+                if resolution_summary:
+                    ticket_section_closed["resolution_summary"] = resolution_summary
+            if ticket_id is not None:
+                escalation_update: Dict[str, Any] = {
+                    "$set": {
+                        "closed_at": closed_recorded,
+                    }
+                }
+                if status_info and status_info.get("status") is not None:
+                    escalation_update["$set"]["ticket_status"] = status_info.get("status")
+                db[SUPPORT_ESCALATIONS_COL].update_one(
+                    {"user_id": user_id, "persona": persona_name, "ticket_id": str(ticket_id)},
+                    escalation_update,
+                )
+        else:
+            forwarded_payload = _forward_chat_to_ticket(
+                user_id=user_id,
+                persona_name=persona_name,
+                ticket_entry=active_ticket_entry,
+                user_message=user_message or "",
+            )
+            return jsonify(forwarded_payload), 200
+    
     try:
         model_settings, common_phrases = get_persona_context(persona_name)
         if common_phrases:
@@ -1763,6 +2054,8 @@ def chat_handler():
             payload["glpi_ticket_id"] = glpi_ticket_id
         if sources:
             payload["sources"] = sources
+        if ticket_section_closed:
+            payload["ticket_section_closed"] = ticket_section_closed
         return jsonify(payload), 200
 
     except Exception as e:

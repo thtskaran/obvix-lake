@@ -48,7 +48,8 @@ class FeedbackLoop:
         if customer_feedback:
             ratings = [float(doc.get("rating", 0)) for doc in customer_feedback if doc.get("rating") is not None]
             avg_csat = sum(ratings) / len(ratings) if ratings else 0.0
-        persona_kb_collections = [name for name in self.db.list_collection_names() if name.startswith("persona_")]
+        collection_names = self.db.list_collection_names()
+        persona_kb_collections = [name for name in collection_names if name.startswith("persona_")]
         auto_articles = 0
         manual_articles = 0
         for name in persona_kb_collections:
@@ -76,8 +77,8 @@ class FeedbackLoop:
             "avg_csat": avg_csat,
             "knowledge_growth_ratio": knowledge_ratio,
         }
-        resolution_coll = self.db.get("glpi_resolutions")
-        if resolution_coll:
+        if "glpi_resolutions" in collection_names:
+            resolution_coll = self.db["glpi_resolutions"]
             durations = []
             cursor = resolution_coll.find({"closed_at": {"$gte": thirty_days_ago}, "raw_ticket.date": {"$exists": True}})
             for doc in cursor:
