@@ -38,11 +38,10 @@ class FeedbackLoop:
         now = datetime.now(timezone.utc)
         thirty_days_ago = now - timedelta(days=30)
         routing_coll = self.db["ticket_routing_audit"]
-        auto_rate = 0.0
-        auto_count = routing_coll.count_documents({"decision": "auto_resolved", "timestamp": {"$gte": thirty_days_ago}})
-        manual_count = routing_coll.count_documents({"decision": "human_agent", "timestamp": {"$gte": thirty_days_ago}})
-        total = auto_count + manual_count
-        auto_rate = (auto_count / total) if total else 0.0
+        assistive_count = routing_coll.count_documents({"decision": "assistive", "timestamp": {"$gte": thirty_days_ago}})
+        human_count = routing_coll.count_documents({"decision": "human_agent", "timestamp": {"$gte": thirty_days_ago}})
+        total = assistive_count + human_count
+        assistive_rate = (assistive_count / total) if total else 0.0
         feedback_coll = self.db[self.feedback_collection]
         customer_feedback = list(feedback_coll.find({"source": "customer", "created_at": {"$gte": thirty_days_ago}}))
         avg_csat = 0.0
@@ -71,9 +70,9 @@ class FeedbackLoop:
         knowledge_ratio = (auto_articles / manual_articles) if auto_articles else 0.0
         metrics = {
             "timestamp": now,
-            "auto_resolution_rate": auto_rate,
-            "auto_resolved": auto_count,
-            "human_agent": manual_count,
+            "assistive_rate": assistive_rate,
+            "assistive": assistive_count,
+            "human_agent": human_count,
             "avg_csat": avg_csat,
             "knowledge_growth_ratio": knowledge_ratio,
         }

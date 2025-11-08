@@ -32,6 +32,7 @@ from services.rag_pipeline import (
     format_chunks_for_prompt,
     parse_self_rag_tokens,
 )
+from services.crm_enrichment import CRMEnrichmentConfig, load_crm_enrichment_config
 
 # ==============================================================================
 # CONFIGURATION
@@ -82,6 +83,26 @@ GROUNDING_FAIL_THRESHOLD = float(os.getenv("GROUNDING_FAIL_THRESHOLD", "0.60"))
 GROUNDING_CAUTION_THRESHOLD = float(os.getenv("GROUNDING_CAUTION_THRESHOLD", "0.85"))
 
 GLPI_ENABLED = all([GLPI_HOST, GLPI_APP_TOKEN, GLPI_API_TOKEN])
+
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CRM_PROFILE_CONFIG_PATH = os.path.join(APP_ROOT, "config", "crm_profile_config.json")
+CRM_PROFILE_CONFIG_PATH = os.getenv("CRM_PROFILE_CONFIG_PATH") or DEFAULT_CRM_PROFILE_CONFIG_PATH
+try:
+    crm_enrichment_config: CRMEnrichmentConfig = load_crm_enrichment_config(CRM_PROFILE_CONFIG_PATH)
+except (FileNotFoundError, ValueError) as exc:
+    raise SystemExit(f"❌ FATAL: {exc}") from exc
+except RuntimeError as exc:
+    raise SystemExit(f"❌ FATAL: {exc}") from exc
+logging.info(
+    "CRM enrichment configured with %d fields (source=%s)",
+    len(crm_enrichment_config.field_names),
+    crm_enrichment_config.source,
+)
+
+MIN_ASSIST_TURNS = int(os.getenv("MIN_ASSIST_TURNS", "2"))
+MAX_ASSIST_TURNS = int(os.getenv("MAX_ASSIST_TURNS", "4"))
+if MAX_ASSIST_TURNS < MIN_ASSIST_TURNS:
+    MAX_ASSIST_TURNS = MIN_ASSIST_TURNS
 
 # Persona folder cache for Drive Docs placement
 PERSONA_FOLDER_INDEX: Dict[str, str] = {}
@@ -501,36 +522,32 @@ def infer_conversation_tone(history: List[Dict[str, str]]) -> Dict[str, Any]:
     joined = "\n".join([f"{m['role']}: {m['content']}" for m in history[-8:]])
     return _llm_json_call(system, joined, {"tone_observed": "neutral", "confidence": 0.5})
 
-# ==============================================================================
+# ============================================================================== 
 # CRM ENRICHMENT
 # ==============================================================================
-EXTRACT_FIELDS = [
-    "email", "name", "gender", "income_range", "salary", "city", "address_area",
-    "phone", "company", "use_case", "product_interest", "needs", "wants",
-    "pain_points", "budget", "plan_speed", "devices_count", "household_size",
-    "timeline", "installation_time_preference", "preferred_contact_time",
-    "current_provider", "tone_preference"
-]
+CRM_ALLOWED_FIELDS = crm_enrichment_config.field_names
 
 def extract_and_upsert_profile_fields(user_id: str, message: str, history: Optional[List[Dict[str, str]]] = None):
+    if not CRM_ALLOWED_FIELDS:
+        return
     context = ""
     if history:
         context = "\nRecent history:\n" + "\n".join([f"{m['role']}: {m['content']}" for m in history[-6:]])
     system = (
         "Extract structured CRM fields from the message and short history if available.\n"
-        f"Only these keys: {EXTRACT_FIELDS}.\n"
+        f"Only these keys: {CRM_ALLOWED_FIELDS}.\n"
         "Return a STRICT JSON object with any found keys. "
-        "Normalize: email lowercased; budget as simple string (e.g., '1000-1500 INR'); "
-        "income_range/salary as simple strings; plan_speed as plain number with 'Mbps' if present (e.g., '300 Mbps')."
+        "If a field is not present, omit it."
     )
     result = _llm_json_call(system, f"Message:\n{message}\n{context}", {})
-    if "email" not in result:
+    normalized_result = crm_enrichment_config.normalize(result)
+    if "email" in CRM_ALLOWED_FIELDS and "email" not in normalized_result:
         m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", message or "")
         if m:
-            result["email"] = m.group(0).lower()
-    if not result:
+            normalized_result["email"] = m.group(0).lower()
+    if not normalized_result:
         return
-    db[USER_PROFILES_COL].update_one({"user_id": user_id}, {"$set": result}, upsert=True)
+    db[USER_PROFILES_COL].update_one({"user_id": user_id}, {"$set": normalized_result}, upsert=True)
 
 # ==============================================================================
 # TEXT GENERATORS
@@ -546,17 +563,22 @@ def resolve_model_name(model_settings: Dict[str, Any], persona_name: str) -> str
     return slug.title() if slug else "Agent"
 
 def build_user_memory_snippet(user_profile: Dict[str, Any]) -> str:
-    keys_in_priority = [
-        "name", "city", "address_area", "gender", "income_range", "salary", "budget",
-        "product_interest", "plan_speed", "needs", "wants", "pain_points", "use_case",
-        "current_provider", "devices_count", "household_size", "timeline",
-        "installation_time_preference", "preferred_contact_time", "tone_preference"
-    ]
+    prioritized_keys = []
+    for key in crm_enrichment_config.memory_priority + ["tone_preference", "tone_observed"]:
+        if key not in prioritized_keys:
+            prioritized_keys.append(key)
+
     items = []
-    for k in keys_in_priority:
-        v = user_profile.get(k)
-        if v is not None and v != "":
-            items.append(f"{k}: {v}")
+    for key in prioritized_keys:
+        value = user_profile.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, (dict, list)):
+            formatted = json.dumps(value, ensure_ascii=False)
+        else:
+            formatted = str(value)
+        items.append(f"{key}: {formatted}")
+
     return "; ".join(items) if items else "No stored user facts."
 
 # ==============================================================================
@@ -580,9 +602,6 @@ def build_router_context(router_payload: Optional[Dict[str, Any]]) -> str:
     header = "Router classification: " + ", ".join(parts) if parts else "Router classification unavailable."
     matches = router_payload.get("matches") or []
     snippets = [f"- {match.get('content', '')[:320]}" for match in matches[:3] if match.get('content')]
-    resolution_note = router_payload.get("resolution_proposal")
-    if resolution_note:
-        snippets.insert(0, f"Proposed resolution: {resolution_note[:400]}")
     snippet_block = "\n".join(snippets) if snippets else "- No high-confidence knowledge snippets surfaced yet."
     return f"{header}\nSuggested references:\n{snippet_block}"
 
@@ -598,7 +617,7 @@ def construct_support_messages(
 ):
     instruction = (
         "Answer the user's query using ONLY the provided knowledge snippets. "
-        "If the knowledge is insufficient, say you don't have enough information and recommend escalation."
+        "If coverage is insufficient, acknowledge it honestly and suggest next steps or offer to connect with a human."
     )
     memory = build_user_memory_snippet(user_profile)
     tone_pref = user_profile.get("tone_preference", "")
@@ -611,9 +630,10 @@ Objective: {instruction}
 
 Constraints:
 - Use only approved knowledge below plus router guidance.
-- Never invent fixes; if unsure, say you will escalate.
+- Never invent fixes; if unsure, say you will escalate or gather more detail.
 - Tone: match preference ({tone_pref or 'none'}) else observed tone ({tone_obs}).
 - When giving steps, number them and keep each step under 25 words.
+- Speak naturally like a support agent; do not mention internal document IDs or "limited confidence" disclaimers.
 - Use these approved phrases when natural: {common_phrases or 'n/a'}
 
 User memory: {memory}
@@ -623,9 +643,9 @@ Knowledge base snippets:\n{knowledge_block}
 
 Self-RAG protocol:
 1. BEFORE answering output [RELEVANT] if the knowledge is sufficient, otherwise output [IRRELEVANT].
-2. If [IRRELEVANT], respond with "I don't have information about this." and stop.
-3. If [RELEVANT], answer the query using ONLY the provided knowledge and cite sources like [kb_doc_001].
-4. AFTER your answer, output [GROUNDED] if every claim is cited or [UNGROUNDED] otherwise.
+2. If [IRRELEVANT], respond with a brief apology and offer to escalate or follow up with a human.
+3. If [RELEVANT], answer the query using ONLY the provided knowledge in natural language (no citation brackets).
+4. AFTER your answer, output [GROUNDED] if every claim is supported by the provided knowledge or [UNGROUNDED] otherwise.
 5. Prefer [IRRELEVANT] or [UNGROUNDED] over guessing.
 """
     messages = [{"role": "system", "content": system_prompt}]
@@ -1034,35 +1054,6 @@ def chat_handler():
 
     try:
         model_settings, common_phrases = get_persona_context(persona_name)
-        rag_context = rag_pipeline.build_context(persona_name, user_message or "Introduction")
-        retrieved_chunks = rag_context.get("chunks") or []
-        knowledge_block = format_chunks_for_prompt(retrieved_chunks)
-        response_prefix = rag_context.get("response_prefix", "")
-        rag_reason = rag_context.get("reason")
-        rag_escalation = rag_context.get("decision") == "escalate"
-
-        # Router-assistive override: if the ticket router marked this turn as
-        # assistive and RAG's max_similarity is reasonably high, allow the
-        # assistant to respond instead of escalating. This helps when the
-        # KB match is useful but below the strict RAG thresholds.
-        try:
-            if rag_escalation and router_payload and router_payload.get("assistive"):
-                max_sim = (rag_context.get("metrics") or {}).get("max_similarity")
-                # Fallback to looking at similarity scores list if max_similarity missing
-                if max_sim is None:
-                    sims = (rag_context.get("metrics") or {}).get("similarity_scores") or []
-                    max_sim = max(sims) if sims else 0.0
-                if float(max_sim or 0.0) >= 0.45:
-                    logging.info(
-                        "Router-assistive override applied (max_similarity=%.3f) for user %s persona %s",
-                        float(max_sim), user_id, persona_name,
-                    )
-                    rag_context["decision"] = "proceed"
-                    rag_context["reason"] = (rag_context.get("reason") or "") + " | overridden_by_router_assistive"
-                    rag_escalation = False
-        except Exception as _:
-            # Defensive: if any of the metrics shape is unexpected, do not crash the handler.
-            logging.debug("Router assistive override check failed; continuing without override.")
 
         router_payload = None
         if ticket_router and user_message:
@@ -1078,24 +1069,53 @@ def chat_handler():
                 upsert=True
             )
 
+        rag_context = rag_pipeline.build_context(persona_name, user_message or "Introduction")
+        retrieved_chunks = rag_context.get("chunks") or []
+        knowledge_block = format_chunks_for_prompt(retrieved_chunks)
+        response_prefix = rag_context.get("response_prefix", "")
+        rag_reason = rag_context.get("reason")
+        rag_escalation = rag_context.get("decision") == "escalate"
+        has_retrieved_chunks = bool(retrieved_chunks)
+
         classification = (router_payload or {}).get("classification", {})
         needs_supervisor = bool(classification.get("needs_supervisor"))
-        requires_human = bool(classification.get("requires_human"))
-        has_rag_matches = bool((router_payload or {}).get("matches"))
+        router_requests_human = bool(router_payload and router_payload.get("route_to_human"))
+        router_has_matches = bool((router_payload or {}).get("matches"))
+
+        assist_attempts = int(user_profile.get("assist_attempts_with_kb", 0))
 
         escalation_reasons: List[str] = []
         if rag_escalation:
             escalation_reasons.append(rag_reason or "RAG validation gate triggered escalation")
         if needs_supervisor:
             escalation_reasons.append("Ticket router requested supervisor involvement")
-        if requires_human and not has_rag_matches:
+        if router_requests_human and not router_has_matches:
             escalation_reasons.append("Ticket router requires human handoff due to missing KB coverage")
+        elif router_requests_human and router_has_matches:
+            escalation_reasons.append("Ticket router recommended a human follow-up")
 
         should_escalate = bool(escalation_reasons)
+        escalation_deferred = False
+
+        if should_escalate and has_retrieved_chunks:
+            if assist_attempts < MIN_ASSIST_TURNS:
+                escalation_deferred = True
+                should_escalate = False
+            elif assist_attempts < MAX_ASSIST_TURNS and not needs_supervisor:
+                escalation_deferred = True
+                should_escalate = False
+
+        if escalation_deferred:
+            rag_context["confidence"] = "LOW"
+            rag_context["decision"] = "proceed"
+            rag_context["reason"] = (rag_context.get("reason") or "") + " | escalation_deferred"
 
         glpi_ticket_id = None
+        response_content = ""
+        escalation_reason_text = "; ".join(escalation_reasons) if escalation_reasons else None
+        next_attempts = assist_attempts
+
         if should_escalate:
-            reason_text = "; ".join(escalation_reasons)
             pending_reply = ASSISTANT_OUTCOME_RESPONSES['escalated']
             glpi_ticket_id = record_escalation_case(
                 user_id,
@@ -1104,17 +1124,14 @@ def chat_handler():
                 user_message,
                 router_payload,
                 rag_context=rag_context,
-                escalation_reason=reason_text,
+                escalation_reason=escalation_reason_text,
                 assistant_reply=pending_reply,
             )
             response_content = pending_reply
             if glpi_ticket_id:
                 response_content += f" Reference ticket #{glpi_ticket_id}."
-            persist_rag_metrics(user_id, persona_name, rag_context, True, reason_text)
-        elif router_payload and router_payload.get("decision") == "auto_resolved" and router_payload.get("resolution_proposal"):
-            # Auto-resolve suggested by router: return proposed resolution directly.
-            response_content = "Here's what typically fixes this scenario:\n" + router_payload["resolution_proposal"]
-            persist_rag_metrics(user_id, persona_name, rag_context, False, None)
+            persist_rag_metrics(user_id, persona_name, rag_context, True, escalation_reason_text)
+            next_attempts = 0
         else:
             llm_messages = construct_support_messages(
                 model_settings,
@@ -1156,10 +1173,14 @@ def chat_handler():
                     f"Answer grounding score {grounding_score:.2f} below threshold"
                 )
             elif GROUNDING_FAIL_THRESHOLD <= grounding_score < GROUNDING_CAUTION_THRESHOLD:
-                answer_body = (
-                    f"⚠️ LIMITED CONFIDENCE: {answer_body}\n\n"
-                    "Note: Some claims have weak support."
-                )
+                rag_context["confidence"] = "LOW"
+
+            if late_escalation_reason and has_retrieved_chunks and assist_attempts < MAX_ASSIST_TURNS:
+                escalation_deferred = True
+                late_escalation_reason = None
+                rag_context["confidence"] = "LOW"
+                rag_context["decision"] = "proceed"
+                rag_context["reason"] = (rag_context.get("reason") or "") + " | defer_late_escalation"
 
             if late_escalation_reason:
                 glpi_ticket_id = record_escalation_case(
@@ -1176,15 +1197,28 @@ def chat_handler():
                 if glpi_ticket_id:
                     response_content += f" Reference ticket #{glpi_ticket_id}."
                 persist_rag_metrics(user_id, persona_name, rag_context, True, late_escalation_reason)
+                next_attempts = 0
             else:
-                response_content = answer_body
+                response_content = answer_body or (
+                    "I don't have enough information yet. Could you share a bit more detail about what's happening?"
+                )
                 rag_context["decision"] = "respond"
                 persist_rag_metrics(user_id, persona_name, rag_context, False, None)
+                if has_retrieved_chunks:
+                    if rag_context.get("confidence") == "HIGH" and not escalation_deferred:
+                        next_attempts = 0
+                    else:
+                        next_attempts = min(MAX_ASSIST_TURNS, assist_attempts + 1)
+                else:
+                    next_attempts = 0
 
         save_message_to_history(user_id, "assistant", response_content)
         db[USER_PROFILES_COL].update_one(
             {"user_id": user_id},
-            {"$set": {"last_bot_reply": datetime.now(timezone.utc)}},
+            {"$set": {
+                "last_bot_reply": datetime.now(timezone.utc),
+                "assist_attempts_with_kb": next_attempts,
+            }},
             upsert=True
         )
         payload = {"message": response_content}
@@ -1192,6 +1226,8 @@ def chat_handler():
             payload["router"] = router_payload
         if glpi_ticket_id:
             payload["glpi_ticket_id"] = glpi_ticket_id
+        payload["escalation_deferred"] = escalation_deferred
+        payload["assist_attempts_with_kb"] = next_attempts
         if 'rag_context' in locals() and rag_context:
             payload["confidence"] = rag_context.get("confidence")
             payload["sources"] = [

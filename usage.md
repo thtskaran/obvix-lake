@@ -2,7 +2,7 @@
 
 # Usage Guide — Obvix Lake Conversational Orchestrator
 
-This service orchestrates end-to-end support conversations with a single endpoint. Every turn now flows through the ticket router, hybrid RAG stack, and validation gates so the bot can either auto-resolve by citing knowledge or escalate with the full diagnostic trace—no finite-state machine required.
+This service orchestrates end-to-end support conversations with a single endpoint. Every turn now flows through the ticket router, hybrid RAG stack, and validation gates so the bot can work knowledge-grounded diagnostics and only escalate with the full trace when confidence stays low after several attempts—no finite-state machine required.
 
 It continually enriches a lightweight CRM / ticket profile in MongoDB and uses that memory to personalize every reply.
 
@@ -27,15 +27,17 @@ It continually enriches a lightweight CRM / ticket profile in MongoDB and uses t
 {
   "message": "assistant's reply text",
   "confidence": "HIGH",
+  "escalation_deferred": false,
+  "assist_attempts_with_kb": 1,
   "sources": [
     {"id": "kb_doc_001", "source": "ticket_12345", "preview": "Reboot firewall and reapply policy"}
   ],
   "glpi_ticket_id": "24857",            // present only when escalated
-  "router": { ... }                       // ticket router payload when available
+  "router": { ... }                       // ticket router payload when available (includes route_to_human)
 }
 ```
 
-`confidence` reflects the hybrid retrieval + grounding gates (HIGH or LOW). `sources` enumerates every chunk cited in the response so downstream clients can build inline references. When the validation gates fail, `glpi_ticket_id` is returned after the deterministic handoff to GLPI.
+`confidence` reflects the hybrid retrieval + grounding gates (HIGH or LOW). `escalation_deferred` is `true` when the assistant is intentionally continuing troubleshooting before involving a human, and `assist_attempts_with_kb` tracks how many KB-backed replies have happened in the current window. `sources` enumerates every chunk cited in the response so downstream clients can build inline references. When the validation gates fail, `glpi_ticket_id` is returned after the deterministic handoff to GLPI.
 
 **GET `/personas`**
 
@@ -61,7 +63,7 @@ Notes:
 | `/tickets/route` | POST | Standalone ticket router + semantic lookup. Pass `{ "persona": "ol_support", "description": "..." }` to receive the classifier decision, urgency, and best matching knowledge snippets. |
 | `/analytics/trends` | GET | Returns the most recent clustering + trend analysis computed from GLPI resolutions (emerging issues, top entities, cluster sizes). |
 | `/feedback` | POST | Agent/customer feedback ingestion (`rating`, `comment`, optional `ticket_id`). Feeds the feedback loop + metrics. |
-| `/metrics` | GET | Latest KPI snapshot (auto-resolution rate, CSAT, knowledge growth ratio, avg resolution hours). |
+| `/metrics` | GET | Latest KPI snapshot (assistive rate, CSAT, knowledge growth ratio, avg resolution hours). |
 
 All operational endpoints return JSON and reuse the same auth context as `/chat`.
 
@@ -71,24 +73,25 @@ All operational endpoints return JSON and reuse the same auth context as `/chat`
 
 Every `/chat` request is steered by three building blocks instead of an explicit state machine:
 
-* **Ticket router signals** – classification (`issue_category`, `impact_scope`, `requires_human`, etc.) plus optional auto-resolution snippets.
+* **Ticket router signals** – classification (`issue_category`, `impact_scope`, `requires_human`, etc.) plus semantic similarity scores and a `route_to_human` flag.
 * **Hybrid RAG retrieval + validation** – semantic + lexical retrieval, LLM relevance judge, and grounding score thresholds.
-* **Outcome resolver** – chooses between (a) answering with numbered guidance, (b) returning the router’s resolution verbatim, or (c) escalating with a GLPI ticket when confidence is too low.
+* **Outcome resolver** – keeps the assistant in the loop for at least `MIN_ASSIST_TURNS` (default 2) and up to `MAX_ASSIST_TURNS` (default 4) when knowledge is available; after that, or when coverage is missing, it escalates with the full diagnostic trace.
 
 Persona prompts govern pacing and recap behavior, so the dialog feels stateful without keeping an explicit state machine in memory.
 
 ---
 
-## 3) Ticket Router & Auto-Resolution
+## 3) Ticket Router & Assistive Guidance
 
 Before the assistant replies, the ticket text is scored by `services/ticket_router.TicketRouter`:
 
 * Multi-dimensional classifier returns `issue_category`, `issue_type`, `urgency`, `impact_scope`, `sentiment`, `requires_human`, `needs_supervisor`, and `confidence`.
 * Semantic similarity search (same persona partition) surfaces the top knowledge chunks plus any GLPI-derived snippets published by the knowledge pipeline.
 * Decisions:
-  * **Auto-resolved** – if similarity ≥ threshold and `requires_human` is false, the assistant replies directly with the matching fix.
-  * **Human required** – if `needs_supervisor` or `requires_human` is true, the system escalates immediately and the reply confirms the handoff.
-  * **Assistive mode** – otherwise the router context is embedded into the LLM prompt so diagnostics reference the suggested articles.
+  * **Assistive mode** – default path when knowledge exists; router snippets are embedded into the LLM prompt so diagnostics reference the suggested articles.
+  * **Human required** – if `needs_supervisor` is true or the router couldn’t surface a useful match, `route_to_human` is returned so the conversation can escalate after the assistant exhausts its configured attempts.
+
+> Tune the conversational patience window with `MIN_ASSIST_TURNS` (default **2**) and `MAX_ASSIST_TURNS` (default **4**). The assistant will stay engaged for that many KB-backed replies before handing off. Attempts are tracked per `user_id` in Mongo under `assist_attempts_with_kb`.
 
 You can also call the router directly through `POST /tickets/route` for standalone experiments.
 
@@ -141,14 +144,13 @@ All under MongoDB collection `user_profiles`:
 
 **Identity & Contact**
 
-* `user_id` (key), `name`, `email`, `phone`, `gender`, `city`, `address_area`, `company`
+* `user_id` (key), `name`, `email`, `phone`, `company`, `job_title`, `department`, `industry`, `website`, `location`, `city`, `country`
 
 **Needs & Context**
 
 * `use_case`, `product_interest`, `needs`, `wants`, `pain_points`
-* `budget` (also derived `budget_inr_min`, `budget_inr_max` when detectable)
-* `plan_speed` (and `plan_speed_mbps`), `timeline`, `installation_time_preference`, `preferred_contact_time`
-* `current_provider`, `devices_count`, `household_size`
+* `current_solution`, `integration_requirements`, `success_metrics`, `decision_maker`, `stakeholders`
+* `budget`, `timeline`, `preferred_contact_time`, `preferred_contact_channel`
 
 **Persona & Ticketing Context**
 
@@ -165,7 +167,10 @@ All under MongoDB collection `user_profiles`:
 **Operational**
 
 * `message_count`
+* `assist_attempts_with_kb`
 * Optional fields you add for analytics (e.g., `intake_notes_captured`, `diagnostics_completed`)
+
+> The schema above is just the default. Edits to `config/crm_profile_config.json` (or an alternate file referenced via `CRM_PROFILE_CONFIG_PATH`) automatically adjust which keys are captured and how they are normalized—no code changes required. Fields omitted from the config are neither requested from the LLM nor persisted to MongoDB. The application will fail to start if the referenced JSON file is missing or malformed, keeping configuration as the single source of truth.
 
 > The system **auto-enriches** these fields every turn by extracting from the latest message + short history and by inferring tone/intent. When present, these values are fed back into prompts to personalize replies.
 
@@ -173,23 +178,21 @@ All under MongoDB collection `user_profiles`:
 
 ## 7) What the Assistant Uses From Memory
 
-On every reply, prompts include a compact **User Memory** string built from prioritized keys:
-
-* `name, city, address_area, gender, income_range/salary, budget, product_interest, plan_speed, needs, wants, pain_points, use_case, current_provider, devices_count, household_size, timeline, installation_time_preference, preferred_contact_time, tone_preference`
-
-If a value is present, it’s considered **authoritative** for wording and plan suggestions.
+On every reply, prompts include a compact **User Memory** string built from the priority list defined in `config/crm_profile_config.json` (defaults include `name`, `company`, `job_title`, `industry`, `use_case`, `needs`, `pain_points`, `product_interest`, `current_solution`, `decision_maker`, `success_metrics`, `budget`, `timeline`, and contact preferences). If a value is present, it’s considered **authoritative** for wording and plan suggestions.
 Tone is matched using `tone_preference` or `tone_observed`.
 
 ---
 
 ## 8) Minimal Usage Examples
 
-### Auto-resolve via router
+### Multi-turn assist before escalation
 
 ```
 POST /chat {"user_id":"cust_nina_01","persona_name":"ol_technical_and_diagnostics","message":"VPN fails with error 812 on Windows"}
-→ TicketRouter finds a high-similarity GLPI snippet, decision=auto_resolved
-← Response: "Here's what typically fixes this scenario" + remediation steps. Outcome logged as `auto_resolved`.
+→ TicketRouter finds a high-similarity GLPI snippet, decision=assistive, top_similarity=0.62, route_to_human=false
+← Response (turn 1): Assistant shares the best-matching guidance in a natural tone.
+→ Turn 2: user shares additional telemetry → assistant adjusts advice while `assist_attempts_with_kb` increments.
+→ Turn 3: similarity stays low, attempts reach `MAX_ASSIST_TURNS` → next reply confirms a human escalation with the accumulated diagnostics attached.
 ```
 
 ### Guided diagnostics
@@ -216,7 +219,7 @@ User: “Multiple branches offline; MPLS circuit down, carrier ticket #4390.”
 * **No hallucinated offers**: replies are instructed to use **only** what’s in RAG for concrete plan/price/benefit claims. Otherwise, speak generally and confirm on the call.
 * **No OTP/sensitive data** requests—ever.
 * **Email capture** is regex-assisted if user embeds it in any message.
-* **Type safety**: numeric fields (e.g., `devices_count`, `household_size`, `plan_speed_mbps`) are normalized when detectable, enabling downstream analytics.
+* **Type safety**: normalization rules declared in `crm_profile_config.json` (for example `email`, `phone`, `lowercase`, `number`) are applied automatically so downstream analytics receive consistent values.
 * **Validated facts only**: the GLPI knowledge pipeline now extracts fact/source pairs and verifies that each source sentence exists in the original transcript. Items containing PII or missing citations are dropped before indexing.
 * **PII scanner**: GLPI-derived articles are rejected if any chunk contains emails/phone numbers, preventing leakage into the vector store.
 * **Observability**: every RAG turn logs retrieval, judge, and grounding metrics to `system_metrics`, enabling dashboards/alerts that mirror the spec.
@@ -227,11 +230,11 @@ User: “Multiple branches offline; MPLS circuit down, carrier ticket #4390.”
 
 | Category      | Keys (non-exhaustive)                                                                                                                                                                        |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity      | `name, email, phone, gender, city, address_area, company`                                                                                                                                    |
-| Needs/Context | `use_case, product_interest, needs, wants, pain_points, budget, plan_speed, timeline, installation_time_preference, preferred_contact_time, current_provider, devices_count, household_size` |
+| Identity      | `name, email, phone, company, job_title, department, industry, website, location, city, country`                                                                                             |
+| Needs/Context | `use_case, product_interest, needs, wants, pain_points, current_solution, integration_requirements, success_metrics, decision_maker, stakeholders, budget, timeline, preferred_contact_time, preferred_contact_channel` |
 | Persona/Ticket| `last_router_decision, last_support_handoff, last_support_attempt, last_intent (optional legacy)`                                                                                            |
 | Tone/Intent   | `tone_preference, tone_observed, needs_supervisor, classifier_confidence`                                                                                                                   |
-| Ops/Progress  | `message_count, intake_notes_captured, diagnostics_completed`                                                                                                                               |
+| Ops/Progress  | `message_count, assist_attempts_with_kb, intake_notes_captured, diagnostics_completed`                                                                                                      |
 
 ---
 
@@ -276,13 +279,13 @@ Every processed resolution is enqueued in `knowledge_pipeline_queue`. The pipeli
 
 Manual reviews happen over the API: `GET /knowledge/queue?status=awaiting_approval` lists drafts, and `POST /knowledge/queue/<id>/approve` (body `{ "reviewer": "alice" }`) publishes the article, marks the knowledge chunks as `approved=manual`, and timestamps the approval.
 
-This makes new fixes searchable immediately alongside Google Drive docs and powers `/tickets/route` auto-resolutions. Configure `KNOWLEDGE_PIPELINE_INTERVAL_SECONDS` to tune how often drafts are processed.
+This makes new fixes searchable immediately alongside Google Drive docs and powers `/tickets/route` assistive lookups. Configure `KNOWLEDGE_PIPELINE_INTERVAL_SECONDS` to tune how often drafts are processed.
 
 ## 14) Trend Analytics & Feedback Loop
 
 * **Clustering:** Resolutions from the last 7 days are embedded and clustered (MiniBatchKMeans). `/analytics/trends` returns cluster ids, labels, sizes, top entities, and trend direction (`emerging/growing/stable/declining`). Refresh cadence is set by `ANALYTICS_REFRESH_INTERVAL_SECONDS`.
 * **Feedback ingestion:** POST `/feedback` with `rating` (1–5), `comment`, optional `source` (`customer|agent`) and `ticket_id`. Everything is stored in `feedback_events`.
-* **Metrics:** A periodic worker aggregates auto-resolution rate, CSAT, knowledge growth ratio, and average GLPI resolution hours into `system_metrics`. `/metrics` always exposes the latest snapshot.
+* **Metrics:** A periodic worker aggregates assistive rate, CSAT, knowledge growth ratio, and average GLPI resolution hours into `system_metrics`. `/metrics` always exposes the latest snapshot.
 
 ## 15) Operational Health Checks
 

@@ -423,11 +423,10 @@ def format_chunks_for_prompt(chunks: Sequence[Dict[str, Any]]) -> str:
     if not chunks:
         return "No supporting documents retrieved."
     lines: List[str] = ["DOCUMENT REFERENCE:"]
-    for chunk in chunks:
+    for idx, chunk in enumerate(chunks, start=1):
         citation_id = chunk.get("citation_id") or chunk.get("doc_id")
         snippet = (chunk.get("content") or "").strip()
         snippet = re.sub(r"\s+", " ", snippet)[:MAX_CONTEXT_PREVIEW_CHARS]
-        lines.append(f"{citation_id}: {snippet}")
-    lines.append("When answering, cite sources like [kb_doc_001].")
+        lines.append(f"Snippet {idx}: {snippet}")
     return "\n".join(lines)
 
