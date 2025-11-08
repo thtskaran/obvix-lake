@@ -6,7 +6,8 @@ import logging
 import json
 import threading
 import re
-from typing import List, Dict, Any, Optional, Tuple
+from xml.etree import ElementTree as ET
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, request, jsonify
@@ -14,147 +15,157 @@ from flask_cors import CORS
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from dotenv import load_dotenv
 from googleapiclient.http import MediaIoBaseDownload
 from openai import OpenAI
 from pymongo import MongoClient, UpdateOne, errors, ASCENDING, DESCENDING
-from dotenv import load_dotenv
-import numpy as np
 from bson import ObjectId
 
-from services.glpi_service import GLPIClient, GLPIEscalationManager, GLPISyncService, ResolutionExtractor
-from services.ticket_router import TicketRouter
-from services.knowledge_pipeline import KnowledgePipeline
+from services.agent_tools import AgentExecutionError, AgentTool, run_agentic_session
 from services.analytics import TrendAnalyzer
+from services.crm_enrichment import load_crm_enrichment_config
 from services.feedback import FeedbackLoop
-from services.rag_pipeline import (
-    HybridRAGPipeline,
-    evaluate_grounding,
-    format_chunks_for_prompt,
-    parse_self_rag_tokens,
+from services.glpi_service import (
+    GLPIClient,
+    GLPIEscalationManager,
+    GLPISyncService,
+    ResolutionExtractor,
 )
-from services.crm_enrichment import CRMEnrichmentConfig, load_crm_enrichment_config
+from services.knowledge_pipeline import KnowledgePipeline
+from services.rag_pipeline import HybridRAGPipeline
+from services.ticket_router import TicketRouter
+
 
 # ==============================================================================
-# CONFIGURATION
+# CONFIGURATION & GLOBAL STATE
 # ==============================================================================
-load_dotenv(override=True)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return (os.environ.get(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+load_dotenv()
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logging.getLogger("googleapiclient.discovery").setLevel(logging.WARNING)
 
 app = Flask(__name__)
-CORS(app, origins="*")
+CORS(app)
 
-# Core Config
-SERVICE_ACCOUNT_FILE = "client.json"
-WATCH_FOLDER_ID = os.getenv("WATCH_FOLDER_ID")
-MONGO_URI = os.getenv("MONGO_URI")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GLPI_HOST = os.getenv("GLPI_HOST")
-GLPI_APP_TOKEN = os.getenv("GLPI_APP_TOKEN")
-GLPI_API_TOKEN = os.getenv("GLPI_API_TOKEN")
-DEFAULT_SUPPORT_PERSONA = os.getenv("DEFAULT_SUPPORT_PERSONA", "ol_technical_and_diagnostics")
-GLPI_SYNC_INTERVAL_SECONDS = int(os.getenv("GLPI_SYNC_INTERVAL_SECONDS", "30"))
-KNOWLEDGE_PIPELINE_INTERVAL_SECONDS = int(os.getenv("KNOWLEDGE_PIPELINE_INTERVAL_SECONDS", "60"))
-ANALYTICS_REFRESH_INTERVAL_SECONDS = int(os.getenv("ANALYTICS_REFRESH_INTERVAL_SECONDS", "600"))
-METRICS_REFRESH_INTERVAL_SECONDS = int(os.getenv("METRICS_REFRESH_INTERVAL_SECONDS", "900"))
-KNOWLEDGE_AUTO_APPROVE = os.getenv("KNOWLEDGE_AUTO_APPROVE", "true").lower() == "true"
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
+MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DB", "obvix_lake")
+mongo_client = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=int(os.environ.get("MONGO_TIMEOUT_MS", "5000")),
+)
+db = mongo_client[MONGO_DB_NAME]
 
-# DB & Model Config
-DB_NAME = "obvix_lake_db"
-CHAT_HISTORY_COL = "chat_histories"
-USER_PROFILES_COL = "user_profiles"
-GLPI_RAW_TICKETS_COL = "glpi_tickets"
-GLPI_RESOLUTIONS_COL = "glpi_resolutions"
-GLPI_SYNC_STATE_COL = "glpi_sync_state"
-KNOWLEDGE_QUEUE_COL = "knowledge_pipeline_queue"
-ANALYTICS_CLUSTERS_COL = "analytics_clusters"
-TICKET_ROUTING_AUDIT_COL = "ticket_routing_audit"
-FEEDBACK_EVENTS_COL = "feedback_events"
-SYSTEM_METRICS_COL = "system_metrics"
-SUPPORT_ESCALATIONS_COL = "support_escalations"
-PERSONA_COLLECTION_PREFIX = "persona_"
-EMBEDDING_MODEL = "text-embedding-3-large"
-CHAT_MODEL = "gpt-4o"
-LLM_TEMP_LOW = 0.1
-GOOGLE_SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-]
-RAG_JUDGE_MODEL = os.getenv("RAG_JUDGE_MODEL", "gpt-4o-mini")
-GROUNDING_FAIL_THRESHOLD = float(os.getenv("GROUNDING_FAIL_THRESHOLD", "0.60"))
-GROUNDING_CAUTION_THRESHOLD = float(os.getenv("GROUNDING_CAUTION_THRESHOLD", "0.85"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY environment variable must be set.")
 
-GLPI_ENABLED = all([GLPI_HOST, GLPI_APP_TOKEN, GLPI_API_TOKEN])
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL")
+if OPENAI_BASE_URL:
+    openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+else:
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-APP_ROOT = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CRM_PROFILE_CONFIG_PATH = os.path.join(APP_ROOT, "config", "crm_profile_config.json")
-CRM_PROFILE_CONFIG_PATH = os.getenv("CRM_PROFILE_CONFIG_PATH") or DEFAULT_CRM_PROFILE_CONFIG_PATH
-try:
-    crm_enrichment_config: CRMEnrichmentConfig = load_crm_enrichment_config(CRM_PROFILE_CONFIG_PATH)
-except (FileNotFoundError, ValueError) as exc:
-    raise SystemExit(f"❌ FATAL: {exc}") from exc
-except RuntimeError as exc:
-    raise SystemExit(f"❌ FATAL: {exc}") from exc
-logging.info(
-    "CRM enrichment configured with %d fields (source=%s)",
-    len(crm_enrichment_config.field_names),
-    crm_enrichment_config.source,
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-large")
+RAG_JUDGE_MODEL = os.environ.get("RAG_JUDGE_MODEL", "gpt-4o-mini")
+LLM_TEMP_LOW = float(os.environ.get("LLM_TEMP_LOW", "0.2"))
+MAX_EMBED_CHARS = int(os.environ.get("MAX_EMBED_CHARS", "1200"))
+MIN_ASSIST_TURNS = int(os.environ.get("MIN_ASSIST_TURNS", "2"))
+MAX_ASSIST_TURNS = int(os.environ.get("MAX_ASSIST_TURNS", "4"))
+MAX_HISTORY_MESSAGES_TO_RETRIEVE = int(os.environ.get("MAX_HISTORY_MESSAGES", "16"))
+
+PERSONA_COLLECTION_PREFIX = os.environ.get("PERSONA_COLLECTION_PREFIX", "persona_")
+DEFAULT_SUPPORT_PERSONA = os.environ.get("DEFAULT_SUPPORT_PERSONA", "ol_support")
+
+CHAT_HISTORY_COL = os.environ.get("CHAT_HISTORY_COL", "chat_history")
+USER_PROFILES_COL = os.environ.get("USER_PROFILES_COL", "user_profiles")
+KNOWLEDGE_QUEUE_COL = os.environ.get("KNOWLEDGE_QUEUE_COL", "knowledge_pipeline_queue")
+SYSTEM_METRICS_COL = os.environ.get("SYSTEM_METRICS_COL", "system_metrics")
+SUPPORT_ESCALATIONS_COL = os.environ.get("SUPPORT_ESCALATIONS_COL", "support_escalations")
+FEEDBACK_EVENTS_COL = os.environ.get("FEEDBACK_EVENTS_COL", "feedback_events")
+TICKET_ROUTING_AUDIT_COL = os.environ.get("TICKET_ROUTING_AUDIT_COL", "ticket_routing_audit")
+GLPI_SYNC_STATE_COL = os.environ.get("GLPI_SYNC_STATE_COL", "glpi_sync_state")
+GLPI_RAW_TICKETS_COL = os.environ.get("GLPI_RAW_TICKETS_COL", "glpi_tickets")
+GLPI_RESOLUTIONS_COL = os.environ.get("GLPI_RESOLUTIONS_COL", "glpi_resolutions")
+ANALYTICS_CLUSTERS_COL = os.environ.get("ANALYTICS_CLUSTERS_COL", "analytics_clusters")
+
+KNOWLEDGE_AUTO_APPROVE = _env_bool("KNOWLEDGE_AUTO_APPROVE", "true")
+KNOWLEDGE_PIPELINE_INTERVAL_SECONDS = int(os.environ.get("KNOWLEDGE_PIPELINE_INTERVAL_SECONDS", "60"))
+ANALYTICS_REFRESH_INTERVAL_SECONDS = int(os.environ.get("ANALYTICS_REFRESH_INTERVAL_SECONDS", "900"))
+METRICS_REFRESH_INTERVAL_SECONDS = int(os.environ.get("METRICS_REFRESH_INTERVAL_SECONDS", "900"))
+GLPI_SYNC_INTERVAL_SECONDS = int(os.environ.get("GLPI_SYNC_INTERVAL_SECONDS", "1800"))
+
+RAG_TOP_K = int(os.environ.get("RAG_TOP_K", "5"))
+RAG_MAX_CANDIDATES = int(os.environ.get("RAG_MAX_CANDIDATES", "400"))
+RAG_BM25_WEIGHT = float(os.environ.get("RAG_BM25_WEIGHT", "0.40"))
+RAG_SEMANTIC_WEIGHT = float(os.environ.get("RAG_SEMANTIC_WEIGHT", "0.60"))
+
+PERSONA_FOLDER_LOCK = threading.Lock()
+PERSONA_FOLDER_INDEX: Dict[str, str] = {}
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GOOGLE_SERVICE_ACCOUNT_FILE = (
+    os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+    or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    or os.path.join(BASE_DIR, "client.json")
+)
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+if not os.path.exists(GOOGLE_SERVICE_ACCOUNT_FILE):
+    raise FileNotFoundError(
+        f"Google service account file not found at {GOOGLE_SERVICE_ACCOUNT_FILE}. "
+        "Set GOOGLE_SERVICE_ACCOUNT_FILE to the path of your credentials."
+    )
+drive_credentials = service_account.Credentials.from_service_account_file(
+    GOOGLE_SERVICE_ACCOUNT_FILE,
+    scopes=GOOGLE_SCOPES,
+)
+drive_service = build("drive", "v3", credentials=drive_credentials)
+
+WATCH_FOLDER_ID = (
+    os.environ.get("WATCH_FOLDER_ID")
+    or os.environ.get("GOOGLE_DRIVE_WATCH_FOLDER_ID")
+    or "root"
 )
 
-MIN_ASSIST_TURNS = int(os.getenv("MIN_ASSIST_TURNS", "2"))
-MAX_ASSIST_TURNS = int(os.getenv("MAX_ASSIST_TURNS", "4"))
-if MAX_ASSIST_TURNS < MIN_ASSIST_TURNS:
-    MAX_ASSIST_TURNS = MIN_ASSIST_TURNS
-
-# Persona folder cache for Drive Docs placement
-PERSONA_FOLDER_INDEX: Dict[str, str] = {}
-PERSONA_FOLDER_LOCK = threading.Lock()
-
-# RAG & Flow Config
-MAX_HISTORY_MESSAGES_TO_RETRIEVE = 10
-MAX_RAG_DOCS_TO_SCORE = 400
-
-if not all([WATCH_FOLDER_ID, MONGO_URI, OPENAI_API_KEY]):
-    raise SystemExit("❌ FATAL: Missing essential environment variables.")
-
-# ==============================================================================
-# CLIENTS
-# ==============================================================================
-try:
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=GOOGLE_SCOPES
-    )
-    drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    logging.info("✅ Google Drive client initialized.")
-except Exception as e:
-    raise SystemExit(f"❌ FATAL: Failed to initialize Google Drive client: {e}")
-
-try:
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    db = mongo_client[DB_NAME]
-    db[CHAT_HISTORY_COL].create_index([("user_id", ASCENDING), ("timestamp", DESCENDING)])
-    db[USER_PROFILES_COL].create_index([("user_id", ASCENDING)])
-    logging.info("✅ MongoDB client connected.")
-except errors.ConnectionFailure as e:
-    raise SystemExit(f"❌ FATAL: MongoDB connection failed: {e}")
-
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
-logging.info(f"✅ OpenAI client initialized with model: {CHAT_MODEL}")
+CRM_PROFILE_CONFIG_PATH = os.environ.get(
+    "CRM_PROFILE_CONFIG_PATH",
+    os.path.join(BASE_DIR, "config", "crm_profile_config.json"),
+)
+crm_enrichment_config = load_crm_enrichment_config(CRM_PROFILE_CONFIG_PATH)
 
 
 def build_embeddings(texts: List[str]) -> List[List[float]]:
     if not texts:
         return []
     response = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-    return [row.embedding for row in response.data]
+    return [item.embedding for item in response.data]
 
 
 def short_completion(system_prompt: str, user_prompt: str, max_tokens: int = 120) -> str:
-    resp = openai_client.chat.completions.create(
-        model=CHAT_MODEL,
-        temperature=LLM_TEMP_LOW,
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        max_tokens=max_tokens,
-    )
-    return resp.choices[0].message.content.strip()
+    try:
+        response = openai_client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+        )
+        return (response.choices[0].message.content or "").strip()
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.warning("short_completion failed: %s", exc)
+        return ""
 
 
 rag_pipeline = HybridRAGPipeline(
@@ -162,10 +173,20 @@ rag_pipeline = HybridRAGPipeline(
     PERSONA_COLLECTION_PREFIX,
     build_embeddings,
     openai_client,
-    judge_model=RAG_JUDGE_MODEL,
-    top_k=5,
-    max_candidates=MAX_RAG_DOCS_TO_SCORE,
+    RAG_JUDGE_MODEL,
+    top_k=RAG_TOP_K,
+    max_candidates=RAG_MAX_CANDIDATES,
+    bm25_weight=RAG_BM25_WEIGHT,
+    semantic_weight=RAG_SEMANTIC_WEIGHT,
 )
+
+
+GLPI_HOST = os.environ.get("GLPI_HOST")
+GLPI_APP_TOKEN = os.environ.get("GLPI_APP_TOKEN")
+GLPI_API_TOKEN = os.environ.get("GLPI_API_TOKEN")
+GLPI_VERIFY_SSL = _env_bool("GLPI_VERIFY_SSL", "true")
+GLPI_REQUEST_TIMEOUT = int(os.environ.get("GLPI_REQUEST_TIMEOUT", "20"))
+GLPI_ENABLED = bool(GLPI_HOST and GLPI_APP_TOKEN and GLPI_API_TOKEN)
 
 # ==============================================================================
 # DRIVE HELPERS
@@ -197,10 +218,277 @@ def _parse_key_value_doc(text_content: str) -> Dict[str, Any]:
     return profile_data
 
 
+def _split_text_for_embeddings(text: str, max_chars: int = MAX_EMBED_CHARS) -> List[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    paragraphs = re.split(r"\n\s*\n", text)
+    chunks: List[str] = []
+    current: List[str] = []
+    current_length = 0
+
+    def _flush_current():
+        nonlocal current, current_length
+        if current:
+            combined = "\n\n".join(current).strip()
+            if combined:
+                chunks.append(combined)
+        current = []
+        current_length = 0
+
+    for paragraph in paragraphs:
+        para = paragraph.strip()
+        if not para:
+            continue
+        if len(para) > max_chars:
+            _flush_current()
+            for idx in range(0, len(para), max_chars):
+                segment = para[idx : idx + max_chars].strip()
+                if segment:
+                    chunks.append(segment)
+            continue
+        if current_length + len(para) + (2 if current else 0) > max_chars:
+            _flush_current()
+        current.append(para)
+        current_length += len(para) + (2 if current_length else 0)
+
+    _flush_current()
+
+    if not chunks:
+        return [text[:max_chars].strip()]
+
+    return chunks
+
+
+def _prepare_knowledge_segments(
+    entries: List[Dict[str, Any]],
+    default_source: str,
+) -> List[Dict[str, Any]]:
+    segments: List[Dict[str, Any]] = []
+    for entry in entries:
+        content = (entry.get("content") or "").strip()
+        if not content:
+            continue
+        pieces = _split_text_for_embeddings(content)
+        metadata = {
+            "title": entry.get("title"),
+            "tags": entry.get("tags", []),
+            "source": default_source,
+        }
+        for idx, piece in enumerate(pieces):
+            segment_metadata = dict(metadata)
+            if len(pieces) > 1:
+                segment_metadata["segment"] = idx + 1
+            segments.append({"content": piece, "metadata": segment_metadata})
+    return segments
+
+
+def _xml_key_to_snake_case(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    interim = re.sub(r"([^0-9A-Za-z]+)", "_", value)
+    interim = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", interim)
+    return interim.strip("_").lower()
+
+
+def _collect_profile_settings(node: ET.Element, settings: Dict[str, Any]) -> None:
+    if node.attrib.get("name"):
+        key_self = _xml_key_to_snake_case(node.attrib.get("name"))
+        value_self = (node.text or "").strip()
+        if key_self and value_self:
+            settings[key_self] = value_self
+    for element in list(node):
+        tag = element.tag.lower()
+        if tag in {"phrases", "knowledge"}:
+            continue
+        key_source = element.attrib.get("name") or element.tag
+        key = _xml_key_to_snake_case(key_source)
+        text_value = (element.text or "").strip()
+        if key and text_value:
+            settings[key] = text_value
+        for sub in element.findall("setting"):
+            sub_key = _xml_key_to_snake_case(sub.attrib.get("name") or sub.tag)
+            sub_text = (sub.text or "").strip()
+            if sub_key and sub_text:
+                settings[sub_key] = sub_text
+
+
+def _parse_persona_profile_xml(text_content: str) -> Tuple[Dict[str, Any], List[str], List[Dict[str, Any]]]:
+    try:
+        root = ET.fromstring(text_content)
+    except ET.ParseError as exc:  # pragma: no cover - Input validation
+        raise ValueError(f"Invalid persona XML: {exc}") from exc
+
+    if root.tag.lower() != "persona":
+        persona_node = root.find("persona")
+        if persona_node is None:
+            raise ValueError("Persona XML must contain a <persona> root element.")
+        root = persona_node
+
+    profile_settings: Dict[str, Any] = {}
+    for attr_key, attr_value in root.attrib.items():
+        key = _xml_key_to_snake_case(attr_key)
+        if key and attr_value:
+            profile_settings[key] = str(attr_value).strip()
+
+    profile_node = root.find("profile") or root.find("settings")
+    if profile_node is not None:
+        _collect_profile_settings(profile_node, profile_settings)
+    else:
+        for element in root.findall("setting"):
+            _collect_profile_settings(element, profile_settings)
+
+    phrases: List[str] = []
+    phrases_node = root.find("phrases")
+    if phrases_node is not None:
+        for phrase_node in phrases_node.findall(".//phrase"):
+            text = (phrase_node.text or "").strip()
+            if text:
+                phrases.append(text)
+
+    knowledge_entries: List[Dict[str, Any]] = []
+    knowledge_node = root.find("knowledge")
+    if knowledge_node is not None:
+        for entry in list(knowledge_node):
+            if not isinstance(entry.tag, str):  # Skip comments/processing instructions
+                continue
+            title = (entry.findtext("title") or entry.attrib.get("title") or "").strip()
+            summary = (entry.findtext("summary") or "").strip()
+            body = (entry.findtext("body") or entry.findtext("content") or "").strip()
+            steps = [
+                step.text.strip()
+                for step in entry.findall(".//step")
+                if step.text and step.text.strip()
+            ]
+            tips = [
+                tip.text.strip()
+                for tip in entry.findall("./tip")
+                if tip.text and tip.text.strip()
+            ]
+            tags_node = entry.find("tags")
+            tags: List[str] = []
+            if tags_node is not None:
+                tags = [
+                    tag.text.strip()
+                    for tag in tags_node.findall("tag")
+                    if tag.text and tag.text.strip()
+                ]
+                if not tags and tags_node.text:
+                    tags = [part.strip() for part in tags_node.text.split(",") if part.strip()]
+
+            content_lines: List[str] = []
+            if title:
+                content_lines.append(title)
+            if summary:
+                content_lines.append(summary)
+            if body:
+                content_lines.append(body)
+            if steps:
+                content_lines.append("Steps:")
+                content_lines.extend([f"{idx + 1}. {text}" for idx, text in enumerate(steps)])
+            if tips:
+                content_lines.append("Tips:")
+                content_lines.extend([f"- {tip}" for tip in tips])
+
+            for child in entry:
+                tag_name = child.tag if isinstance(child.tag, str) else ""
+                if tag_name in {"title", "summary", "body", "content", "step", "steps", "tip", "tags"}:
+                    continue
+                child_text = (child.text or "").strip()
+                if child_text:
+                    heading = child.attrib.get("label") or child.attrib.get("name") or tag_name
+                    content_lines.append(f"{heading}: {child_text}")
+
+            content = "\n".join(line.strip() for line in content_lines if line.strip()).strip()
+            if not content:
+                continue
+            knowledge_entries.append({
+                "title": title or None,
+                "content": content,
+                "tags": tags,
+            })
+
+    return profile_settings, phrases, knowledge_entries
+
+
 def upsert_persona_document(persona_name: str, file_id: str, file_name: str, text_content: str):
     collection_name = f"{PERSONA_COLLECTION_PREFIX}{persona_name}"
     persona_collection = db[collection_name]
     doc_name_clean = os.path.splitext(file_name)[0].lower().strip()
+    file_ext = os.path.splitext(file_name)[1].lower()
+
+    if file_ext == ".xml" and doc_name_clean == "profile":
+        try:
+            profile_settings, phrases, knowledge_entries = _parse_persona_profile_xml(text_content)
+        except ValueError as exc:
+            logging.error("Skipping persona %s profile.xml due to parse error: %s", persona_name, exc)
+            return
+
+        persona_collection.update_one(
+            {"file_id": file_id, "doc_type": "profile"},
+            {
+                "$set": {
+                    "doc_type": "profile",
+                    "file_id": file_id,
+                    "content": profile_settings,
+                }
+            },
+            upsert=True,
+        )
+
+        phrases_text = "\n".join(phrases).strip()
+        if phrases:
+            persona_collection.update_one(
+                {"file_id": file_id, "doc_type": "phrases"},
+                {
+                    "$set": {
+                        "doc_type": "phrases",
+                        "file_id": file_id,
+                        "content": phrases_text,
+                    }
+                },
+                upsert=True,
+            )
+        else:
+            persona_collection.delete_many({"file_id": file_id, "doc_type": "phrases"})
+
+        persona_collection.delete_many(
+            {"file_id": file_id, "doc_type": "knowledge", "source": "profile_xml"}
+        )
+
+        knowledge_segments = _prepare_knowledge_segments(knowledge_entries, "profile_xml")
+        if knowledge_segments:
+            embed_inputs = [segment["content"] for segment in knowledge_segments]
+            try:
+                embed_vectors = build_embeddings(embed_inputs)
+            except Exception as exc:  # pragma: no cover - external service call
+                logging.error("Embedding generation failed for persona %s: %s", persona_name, exc)
+                embed_vectors = []
+
+            operations = []
+            for idx, segment in enumerate(knowledge_segments):
+                embedding = embed_vectors[idx] if idx < len(embed_vectors) else None
+                operations.append(
+                    UpdateOne(
+                        {"file_id": file_id, "doc_type": "knowledge", "chunk_index": idx},
+                        {
+                            "$set": {
+                                "doc_type": "knowledge",
+                                "file_id": file_id,
+                                "chunk_index": idx,
+                                "content": segment["content"],
+                                "embedding": embedding,
+                                "metadata": segment.get("metadata", {}),
+                                "source": segment.get("metadata", {}).get("source", "profile_xml"),
+                            }
+                        },
+                        upsert=True,
+                    )
+                )
+            if operations:
+                persona_collection.bulk_write(operations)
+        return
 
     if doc_name_clean == "profile":
         profile_data = _parse_key_value_doc(text_content)
@@ -210,30 +498,40 @@ def upsert_persona_document(persona_name: str, file_id: str, file_name: str, tex
                 {"$set": {"doc_type": "profile", "content": profile_data}},
                 upsert=True,
             )
-    elif doc_name_clean == "common_phrases":
+        return
+
+    if doc_name_clean == "common_phrases":
         persona_collection.update_one(
             {"file_id": file_id},
             {"$set": {"doc_type": "phrases", "content": text_content}},
             upsert=True,
         )
-    else:
-        chunks = [c for c in text_content.split("\n\n") if c.strip()]
-        if not chunks:
-            return
-        embeddings = [
-            data.embedding
-            for data in openai_client.embeddings.create(input=chunks, model=EMBEDDING_MODEL).data
-        ]
-        operations = [
-            UpdateOne(
-                {"file_id": file_id, "chunk_index": i},
-                {"$set": {"doc_type": "knowledge", "content": chunk, "embedding": embedding}},
-                upsert=True,
-            )
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-        ]
-        if operations:
-            persona_collection.bulk_write(operations)
+        return
+
+    chunks = _split_text_for_embeddings(text_content)
+    if not chunks:
+        return
+    try:
+        embeddings = build_embeddings(chunks)
+    except Exception as exc:  # pragma: no cover - external service call
+        logging.error("Embedding generation failed for persona %s: %s", persona_name, exc)
+        embeddings = []
+    operations = [
+        UpdateOne(
+            {"file_id": file_id, "chunk_index": i},
+            {
+                "$set": {
+                    "doc_type": "knowledge",
+                    "content": chunk,
+                    "embedding": embeddings[i] if i < len(embeddings) else None,
+                }
+            },
+            upsert=True,
+        )
+        for i, chunk in enumerate(chunks)
+    ]
+    if operations:
+        persona_collection.bulk_write(operations)
 
 
 def _persona_slug(name: Optional[str]) -> str:
@@ -290,7 +588,10 @@ def find_persona_folders_recursively(folder_id: str) -> List[Dict]:
 
             files = response.get("files", [])
 
-            has_profile = any(f["name"].lower() == "profile.txt" for f in files)
+            has_profile = any(
+                f["name"].lower() in {"profile.txt", "profile.xml"}
+                for f in files
+            )
             if has_profile:
                 folder_info = drive_service.files().get(fileId=folder_id, fields="name").execute()
                 all_persona_folders.append({"id": folder_id, "name": folder_info["name"]})
@@ -493,7 +794,13 @@ glpi_client: Optional[GLPIClient]
 glpi_sync_service: Optional[GLPISyncService]
 glpi_escalation_manager: Optional[GLPIEscalationManager]
 if GLPI_ENABLED:
-    glpi_client = GLPIClient(GLPI_HOST, GLPI_APP_TOKEN, GLPI_API_TOKEN)
+    glpi_client = GLPIClient(
+        GLPI_HOST,
+        GLPI_APP_TOKEN,
+        GLPI_API_TOKEN,
+        verify_ssl=GLPI_VERIFY_SSL,
+        request_timeout=GLPI_REQUEST_TIMEOUT,
+    )
     glpi_sync_service = GLPISyncService(
         db,
         glpi_client,
@@ -553,9 +860,11 @@ def extract_and_upsert_profile_fields(user_id: str, message: str, history: Optio
 # TEXT GENERATORS
 # ==============================================================================
 def resolve_model_name(model_settings: Dict[str, Any], persona_name: str) -> str:
-    name = (model_settings or {}).get("model_name")
-    if name:
-        return name
+    model_settings = model_settings or {}
+    for key in ("model_name", "agent_name", "display_name", "persona_name"):
+        name = model_settings.get(key)
+        if name:
+            return str(name)
     slug = persona_name or ""
     if slug.startswith("ol_"):
         slug = slug[3:]
@@ -615,17 +924,27 @@ def construct_support_messages(
     persona_name: str,
     router_payload: Optional[Dict[str, Any]] = None,
 ):
-    instruction = (
+    model_settings = model_settings or {}
+    default_instruction = (
         "Answer the user's query using ONLY the provided knowledge snippets. "
         "If coverage is insufficient, acknowledge it honestly and suggest next steps or offer to connect with a human."
     )
+    instruction = model_settings.get("support_instruction") or default_instruction
+    tone_guidelines = model_settings.get("tone_guidelines") or model_settings.get("style_notes")
+    approved_phrases = common_phrases or model_settings.get("approved_phrases") or "n/a"
     memory = build_user_memory_snippet(user_profile)
     tone_pref = user_profile.get("tone_preference", "")
     tone_obs = (user_profile.get("tone_observed") or "neutral")
     agent_name = resolve_model_name(model_settings, persona_name)
+    persona_identity = (
+        model_settings.get("model_identity")
+        or model_settings.get("persona_identity")
+        or model_settings.get("role_description")
+        or "a senior support specialist"
+    )
     router_context = build_router_context(router_payload)
     system_prompt = f"""
-You are "{agent_name}", {model_settings.get('model_identity', 'a senior support specialist')} for this persona.
+You are "{agent_name}", {persona_identity} for this persona.
 Objective: {instruction}
 
 Constraints:
@@ -634,7 +953,12 @@ Constraints:
 - Tone: match preference ({tone_pref or 'none'}) else observed tone ({tone_obs}).
 - When giving steps, number them and keep each step under 25 words.
 - Speak naturally like a support agent; do not mention internal document IDs or "limited confidence" disclaimers.
-- Use these approved phrases when natural: {common_phrases or 'n/a'}
+- Use these approved phrases when natural: {approved_phrases}
+"""
+    if tone_guidelines:
+        system_prompt += f"\n- Style specifics: {tone_guidelines}"
+
+    system_prompt += f"""
 
 User memory: {memory}
 Router context:\n{router_context}
@@ -651,6 +975,250 @@ Self-RAG protocol:
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     return messages
+
+
+def _sanitize_chunks_for_agent(chunks: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    safe_chunks: List[Dict[str, Any]] = []
+    if not chunks:
+        return safe_chunks
+    for chunk in chunks:
+        preview = (chunk.get("preview") or chunk.get("content") or "").strip()
+        safe_chunks.append(
+            {
+                "citation_id": chunk.get("citation_id"),
+                "doc_id": chunk.get("doc_id"),
+                "preview": preview[:800],
+                "source": chunk.get("source"),
+                "similarity": chunk.get("similarity_score"),
+                "lexical_score": chunk.get("lexical_score"),
+                "fusion_score": chunk.get("fusion_score"),
+                "metadata": chunk.get("metadata", {}),
+            }
+        )
+    return safe_chunks
+
+
+def _build_agent_system_prompt(
+    agent_name: str,
+    model_settings: Dict[str, Any],
+    tone_pref: str,
+    tone_obs: str,
+    assist_attempts: int,
+    min_turns: int,
+    max_turns: int,
+) -> str:
+    default_instruction = (
+        "Answer the user's query using only approved knowledge sources. "
+        "If coverage is insufficient, gather more detail or escalate by creating a ticket."
+    )
+    instruction = model_settings.get("support_instruction") or default_instruction
+    tone_guidelines = model_settings.get("tone_guidelines") or model_settings.get("style_notes")
+    persona_identity = (
+        model_settings.get("model_identity")
+        or model_settings.get("persona_identity")
+        or model_settings.get("role_description")
+        or "a senior support specialist"
+    )
+
+    prompt = f"""
+You are "{agent_name}", {persona_identity} for this persona. Your task: {instruction}
+
+You operate as an agentic assistant with access to tools. Think through problems step-by-step internally (do not reveal chain-of-thought) and decide which tool to call next. Always confirm facts with tools before answering.
+
+Constraints:
+- Match the customer's preferred tone ({tone_pref or 'none'}) or observed tone ({tone_obs}).
+- Number troubleshooting steps and keep them concise (<25 words).
+- Be transparent about uncertainties and offer next actions.
+- If knowledge remains insufficient after {min_turns} assistive attempts (currently at {assist_attempts}), call the ticket tool to escalate. Do not promise escalation without using the tool.
+"""
+    if tone_guidelines:
+        prompt += f"\n- Style guidance: {tone_guidelines}"
+
+    prompt += "\n\nAvailable tools and guidance:\n"
+    prompt += "1. get_router_signals(issue_summary) → classification, urgency, and routing advice.\n"
+    prompt += "2. search_persona_knowledge(query) → retrieve validated knowledge snippets.\n"
+    prompt += "3. retrieve_user_profile(fields?) → review stored CRM context.\n"
+    prompt += "4. summarize_recent_history(limit?) → quick recap of the conversation.\n"
+    prompt += "5. create_support_ticket(summary, reason) → escalate to a human; must call before telling the user you're escalating.\n"
+    prompt += (
+        "You may call tools multiple times. After gathering enough evidence, craft a natural, empathetic reply. "
+        "Cite knowledge snippets descriptively (e.g., “One guide recommends…”) rather than raw IDs."
+    )
+
+    return prompt.strip()
+
+
+def _build_support_agent_tools(
+    *,
+    persona_name: str,
+    user_id: str,
+    latest_user_message: str,
+    history: List[Dict[str, str]],
+    user_profile: Dict[str, Any],
+    conversation_state: Dict[str, Any],
+) -> Tuple[List[AgentTool], Dict[str, Any]]:
+    tool_state: Dict[str, Any] = {
+        "router": None,
+        "router_calls": [],
+        "rag_calls": [],
+        "ticket": None,
+    }
+
+    def _router_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if not ticket_router:
+            return {"status": "unavailable", "reason": "ticket_router_disabled"}
+        summary = (arguments.get("issue_summary") or arguments.get("description") or latest_user_message or "").strip()
+        if not summary:
+            summary = "Customer needs assistance"
+        ticket_id = arguments.get("ticket_id") or f"{user_id}-{int(time.time())}"
+        payload = ticket_router.route_ticket(
+            persona_name,
+            summary,
+            ticket_id=ticket_id,
+            metadata={"persona": persona_name},
+        )
+        tool_state["router"] = payload
+        tool_state["router_calls"].append(payload)
+        db[USER_PROFILES_COL].update_one(
+            {"user_id": user_id},
+            {"$set": {"last_router_decision": payload}},
+            upsert=True,
+        )
+        return {"status": "ok", "payload": payload}
+
+    def _knowledge_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
+        query = (arguments.get("query") or latest_user_message or "").strip()
+        if not query:
+            return {"status": "error", "error": "query_required"}
+        context = rag_pipeline.build_context(persona_name, query)
+        tool_state["rag_calls"].append(context)
+        return {
+            "status": "ok",
+            "decision": context.get("decision"),
+            "confidence": context.get("confidence"),
+            "reason": context.get("reason"),
+            "metrics": context.get("metrics"),
+            "chunks": _sanitize_chunks_for_agent(context.get("chunks")),
+        }
+
+    def _ticket_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
+        reason = (arguments.get("reason") or "Escalation requested by virtual agent").strip()
+        summary = (arguments.get("summary") or latest_user_message or reason).strip()
+        rag_context = tool_state["rag_calls"][-1] if tool_state["rag_calls"] else None
+        router_payload = tool_state.get("router")
+        ticket_id = record_escalation_case(
+            user_id,
+            persona_name,
+            history,
+            latest_user_message,
+            router_payload,
+            rag_context=rag_context,
+            escalation_reason=reason,
+            assistant_reply=summary,
+        )
+        conversation_state["escalated"] = True
+        conversation_state["glpi_ticket_id"] = ticket_id
+        conversation_state["escalation_reason"] = reason
+        tool_state["ticket"] = {
+            "ticket_id": ticket_id,
+            "reason": reason,
+        }
+        return {"status": "ok", "ticket_id": ticket_id, "reason": reason}
+
+    def _profile_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
+        fields = arguments.get("fields") or []
+        if fields and isinstance(fields, list):
+            subset = {key: user_profile.get(key) for key in fields}
+        else:
+            subset = {key: value for key, value in user_profile.items() if key != "_id"}
+        serializable_subset = {
+            key: (str(value) if isinstance(value, ObjectId) else value)
+            for key, value in subset.items()
+        }
+        return {
+            "status": "ok",
+            "profile": serializable_subset,
+            "memory": build_user_memory_snippet(user_profile),
+        }
+
+    def _history_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
+        limit = int(arguments.get("limit", 8))
+        transcript = _format_transcript(history, latest_user_message)
+        lines = transcript.splitlines()[-limit:]
+        return {"status": "ok", "transcript": "\n".join(lines)}
+
+    tools = [
+        AgentTool(
+            name="get_router_signals",
+            description="Classify the issue, get urgency, sentiment, and routing recommendation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "issue_summary": {"type": "string", "description": "Short description of the issue."},
+                    "ticket_id": {"type": "string", "description": "Optional ticket identifier override."},
+                },
+            },
+            handler=_router_tool,
+        ),
+        AgentTool(
+            name="search_persona_knowledge",
+            description="Retrieve high-confidence knowledge snippets for this persona.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Question or topic to search for."},
+                },
+                "required": ["query"],
+            },
+            handler=_knowledge_tool,
+        ),
+        AgentTool(
+            name="create_support_ticket",
+            description="Escalate to a human agent by creating a GLPI ticket.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "Summary included in the ticket."},
+                    "reason": {"type": "string", "description": "Why the escalation is required."},
+                },
+                "required": ["reason"],
+            },
+            handler=_ticket_tool,
+        ),
+        AgentTool(
+            name="retrieve_user_profile",
+            description="Inspect stored CRM attributes for the current user.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional subset of fields to retrieve.",
+                    }
+                },
+            },
+            handler=_profile_tool,
+        ),
+        AgentTool(
+            name="summarize_recent_history",
+            description="Review the recent conversation transcript for context.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of recent lines to return (default 8).",
+                        "minimum": 1,
+                        "maximum": 40,
+                    }
+                },
+            },
+            handler=_history_tool,
+        ),
+    ]
+
+    return tools, tool_state
 
 
 def _map_glpi_urgency(value: Optional[str]) -> int:
@@ -1054,190 +1622,147 @@ def chat_handler():
 
     try:
         model_settings, common_phrases = get_persona_context(persona_name)
+        if common_phrases:
+            model_settings = dict(model_settings or {})
+            model_settings.setdefault("approved_phrases", common_phrases)
 
-        router_payload = None
-        if ticket_router and user_message:
-            router_payload = ticket_router.route_ticket(
-                persona_name,
-                user_message,
-                ticket_id=f"{user_id}-{int(time.time())}",
-                metadata={"persona": persona_name},
-            )
-            db[USER_PROFILES_COL].update_one(
-                {"user_id": user_id},
-                {"$set": {"last_router_decision": router_payload}},
-                upsert=True
-            )
+        assist_attempts = int(user_profile.get("assist_attempts_with_kb", 0))
+        conversation_state = {
+            "escalated": False,
+            "glpi_ticket_id": None,
+            "escalation_reason": None,
+        }
+        tools, tool_state = _build_support_agent_tools(
+            persona_name=persona_name,
+            user_id=user_id,
+            latest_user_message=user_message or "",
+            history=history,
+            user_profile=user_profile,
+            conversation_state=conversation_state,
+        )
 
-        rag_context = rag_pipeline.build_context(persona_name, user_message or "Introduction")
-        retrieved_chunks = rag_context.get("chunks") or []
-        knowledge_block = format_chunks_for_prompt(retrieved_chunks)
-        response_prefix = rag_context.get("response_prefix", "")
-        rag_reason = rag_context.get("reason")
-        rag_escalation = rag_context.get("decision") == "escalate"
-        has_retrieved_chunks = bool(retrieved_chunks)
+        agent_name = resolve_model_name(model_settings, persona_name)
+        system_prompt = _build_agent_system_prompt(
+            agent_name,
+            model_settings,
+            user_profile.get("tone_preference", ""),
+            user_profile.get("tone_observed", "neutral"),
+            assist_attempts,
+            MIN_ASSIST_TURNS,
+            MAX_ASSIST_TURNS,
+        )
+
+        agent_messages = [{"role": "system", "content": system_prompt}]
+        agent_messages.extend(history)
+        agent_messages.append({"role": "user", "content": user_message or ""})
+
+        try:
+            agent_reply, tool_events = run_agentic_session(
+                openai_client,
+                model=CHAT_MODEL,
+                messages=agent_messages,
+                tools=tools,
+                temperature=0.25,
+            )
+        except AgentExecutionError as exc:
+            logging.error("Agentic flow failed: %s", exc)
+            agent_reply = (
+                "I'm sorry—something went wrong while preparing the next steps. "
+                "Let me know if you'd like me to escalate this to a human specialist."
+            )
+            tool_events = []
+
+        response_content = (agent_reply or "").strip() or (
+            "I'm still checking on the best next step. Could you confirm any new details in the meantime?"
+        )
+
+        last_rag_context = tool_state["rag_calls"][-1] if tool_state["rag_calls"] else None
+        router_payload = tool_state.get("router") or (
+            tool_state["router_calls"][-1] if tool_state["router_calls"] else None
+        )
+        escalated = bool(conversation_state.get("escalated"))
+        glpi_ticket_id = conversation_state.get("glpi_ticket_id")
+        escalation_reason_text = conversation_state.get("escalation_reason")
+        if glpi_ticket_id:
+            escalated = True
+
+        response_confidence = (last_rag_context or {}).get("confidence") or "LOW"
+        sources: List[Dict[str, Any]] = []
+        if last_rag_context:
+            for idx, chunk in enumerate(last_rag_context.get("chunks") or [], start=1):
+                preview = (chunk.get("preview") or chunk.get("content") or "").strip()
+                sources.append(
+                    {
+                        "id": chunk.get("citation_id") or f"kb_doc_{idx:03d}",
+                        "preview": preview[:400],
+                        "source": chunk.get("source") or (chunk.get("metadata") or {}).get("source_ticket_id"),
+                    }
+                )
 
         classification = (router_payload or {}).get("classification", {})
         needs_supervisor = bool(classification.get("needs_supervisor"))
         router_requests_human = bool(router_payload and router_payload.get("route_to_human"))
-        router_has_matches = bool((router_payload or {}).get("matches"))
 
-        assist_attempts = int(user_profile.get("assist_attempts_with_kb", 0))
-
-        escalation_reasons: List[str] = []
-        if rag_escalation:
-            escalation_reasons.append(rag_reason or "RAG validation gate triggered escalation")
-        if needs_supervisor:
-            escalation_reasons.append("Ticket router requested supervisor involvement")
-        if router_requests_human and not router_has_matches:
-            escalation_reasons.append("Ticket router requires human handoff due to missing KB coverage")
-        elif router_requests_human and router_has_matches:
-            escalation_reasons.append("Ticket router recommended a human follow-up")
-
-        should_escalate = bool(escalation_reasons)
         escalation_deferred = False
-
-        if should_escalate and has_retrieved_chunks:
-            if assist_attempts < MIN_ASSIST_TURNS:
-                escalation_deferred = True
-                should_escalate = False
-            elif assist_attempts < MAX_ASSIST_TURNS and not needs_supervisor:
-                escalation_deferred = True
-                should_escalate = False
-
-        if escalation_deferred:
-            rag_context["confidence"] = "LOW"
-            rag_context["decision"] = "proceed"
-            rag_context["reason"] = (rag_context.get("reason") or "") + " | escalation_deferred"
-
-        glpi_ticket_id = None
-        response_content = ""
-        escalation_reason_text = "; ".join(escalation_reasons) if escalation_reasons else None
         next_attempts = assist_attempts
 
-        if should_escalate:
-            pending_reply = ASSISTANT_OUTCOME_RESPONSES['escalated']
-            glpi_ticket_id = record_escalation_case(
-                user_id,
-                persona_name,
-                history,
-                user_message,
-                router_payload,
-                rag_context=rag_context,
-                escalation_reason=escalation_reason_text,
-                assistant_reply=pending_reply,
-            )
-            response_content = pending_reply
-            if glpi_ticket_id:
-                response_content += f" Reference ticket #{glpi_ticket_id}."
-            persist_rag_metrics(user_id, persona_name, rag_context, True, escalation_reason_text)
+        if escalated:
+            escalation_deferred = False
             next_attempts = 0
         else:
-            llm_messages = construct_support_messages(
-                model_settings,
-                history,
-                knowledge_block,
-                common_phrases,
-                user_profile,
-                persona_name,
-                router_payload,
-            )
-            if user_message:
-                llm_messages.append({"role": "user", "content": user_message})
-            ai_response = openai_client.chat.completions.create(
-                model=CHAT_MODEL, messages=llm_messages, temperature=0.25, max_tokens=220
-            )
-            raw_response = ai_response.choices[0].message.content or ""
-            reflection = parse_self_rag_tokens(raw_response)
-            validation_metrics = (
-                rag_context.setdefault("metrics", {}).setdefault("validation_metrics", {})
-            )
-            validation_metrics["self_rag_relevant"] = reflection.get("relevance_flag") == "RELEVANT"
-            validation_metrics["self_rag_grounded"] = reflection.get("grounding_flag") == "GROUNDED"
-
-            late_escalation_reason = None
-            if reflection.get("relevance_flag") == "IRRELEVANT":
-                late_escalation_reason = "LLM determined content irrelevant"
-            elif reflection.get("grounding_flag") == "UNGROUNDED":
-                late_escalation_reason = "Answer flagged as UNGROUNDED by Self-RAG"
-
-            answer_body = reflection.get("answer", raw_response).strip()
-            if response_prefix and not answer_body.startswith(response_prefix):
-                answer_body = response_prefix + answer_body
-
-            grounding_stats = evaluate_grounding(answer_body, retrieved_chunks)
-            validation_metrics.update(grounding_stats)
-            grounding_score = grounding_stats.get("grounding_score", 0.0)
-            if not late_escalation_reason and grounding_score < GROUNDING_FAIL_THRESHOLD:
-                late_escalation_reason = (
-                    f"Answer grounding score {grounding_score:.2f} below threshold"
-                )
-            elif GROUNDING_FAIL_THRESHOLD <= grounding_score < GROUNDING_CAUTION_THRESHOLD:
-                rag_context["confidence"] = "LOW"
-
-            if late_escalation_reason and has_retrieved_chunks and assist_attempts < MAX_ASSIST_TURNS:
-                escalation_deferred = True
-                late_escalation_reason = None
-                rag_context["confidence"] = "LOW"
-                rag_context["decision"] = "proceed"
-                rag_context["reason"] = (rag_context.get("reason") or "") + " | defer_late_escalation"
-
-            if late_escalation_reason:
-                glpi_ticket_id = record_escalation_case(
-                    user_id,
-                    persona_name,
-                    history,
-                    user_message,
-                    router_payload,
-                    rag_context=rag_context,
-                    escalation_reason=late_escalation_reason,
-                    assistant_reply=ASSISTANT_OUTCOME_RESPONSES['escalated'],
-                )
-                response_content = ASSISTANT_OUTCOME_RESPONSES['escalated']
-                if glpi_ticket_id:
-                    response_content += f" Reference ticket #{glpi_ticket_id}."
-                persist_rag_metrics(user_id, persona_name, rag_context, True, late_escalation_reason)
-                next_attempts = 0
-            else:
-                response_content = answer_body or (
-                    "I don't have enough information yet. Could you share a bit more detail about what's happening?"
-                )
-                rag_context["decision"] = "respond"
-                persist_rag_metrics(user_id, persona_name, rag_context, False, None)
-                if has_retrieved_chunks:
-                    if rag_context.get("confidence") == "HIGH" and not escalation_deferred:
-                        next_attempts = 0
-                    else:
-                        next_attempts = min(MAX_ASSIST_TURNS, assist_attempts + 1)
+            if last_rag_context:
+                has_chunks = bool(last_rag_context.get("chunks"))
+                rag_decision = last_rag_context.get("decision")
+                if (
+                    (rag_decision == "escalate" or needs_supervisor or router_requests_human)
+                    and has_chunks
+                    and assist_attempts < MAX_ASSIST_TURNS
+                ):
+                    escalation_deferred = True
+                    next_attempts = min(MAX_ASSIST_TURNS, assist_attempts + 1)
                 else:
-                    next_attempts = 0
+                    if has_chunks and last_rag_context.get("confidence") == "HIGH":
+                        next_attempts = 0
+                    elif has_chunks:
+                        next_attempts = min(MAX_ASSIST_TURNS, assist_attempts + 1)
+                    else:
+                        next_attempts = 0
+            else:
+                next_attempts = 0
+
+        if last_rag_context:
+            persist_rag_metrics(
+                user_id,
+                persona_name,
+                last_rag_context,
+                escalated,
+                escalation_reason_text,
+            )
 
         save_message_to_history(user_id, "assistant", response_content)
         db[USER_PROFILES_COL].update_one(
             {"user_id": user_id},
-            {"$set": {
-                "last_bot_reply": datetime.now(timezone.utc),
-                "assist_attempts_with_kb": next_attempts,
-            }},
-            upsert=True
+            {
+                "$set": {
+                    "last_bot_reply": datetime.now(timezone.utc),
+                    "assist_attempts_with_kb": next_attempts,
+                }
+            },
+            upsert=True,
         )
-        payload = {"message": response_content}
+
+        payload: Dict[str, Any] = {
+            "message": response_content,
+            "confidence": response_confidence,
+            "escalation_deferred": escalation_deferred,
+            "assist_attempts_with_kb": next_attempts,
+        }
         if router_payload:
             payload["router"] = router_payload
         if glpi_ticket_id:
             payload["glpi_ticket_id"] = glpi_ticket_id
-        payload["escalation_deferred"] = escalation_deferred
-        payload["assist_attempts_with_kb"] = next_attempts
-        if 'rag_context' in locals() and rag_context:
-            payload["confidence"] = rag_context.get("confidence")
-            payload["sources"] = [
-                {
-                    "id": chunk.get("citation_id"),
-                    "source": chunk.get("source") or (chunk.get("metadata") or {}).get("source_ticket_id"),
-                    "preview": chunk.get("preview") or (chunk.get("content") or "")[:200],
-                }
-                for chunk in (rag_context.get("chunks") or [])
-            ]
+        if sources:
+            payload["sources"] = sources
         return jsonify(payload), 200
 
     except Exception as e:

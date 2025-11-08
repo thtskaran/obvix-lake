@@ -102,13 +102,15 @@ You can also call the router directly through `POST /tickets/route` for standalo
 Each persona lives inside the Google Drive watch folder as a subfolder named `ol_<persona>`.
 For example, `ol_residential_broadband` will be picked up automatically and ingested into MongoDB as the collection `persona_ol_residential_broadband`.
 
-Inside every persona folder place plain-text docs:
+Inside every persona folder place a single **`profile.xml`** file that captures the persona’s voice, phrases, and optional seeded knowledge. The XML supports three top-level sections:
 
-* `profile.txt` → **model settings** (name, role, voice, guardrails)
-* `common_phrases.txt` → **stylistic snippets** to weave into answers
-* Any other `.txt` file → **knowledge chunks** (ingested with embeddings)
+* `<profile>` — Core settings (`<modelName>`, `<modelIdentity>`, `<supportInstruction>`, `<toneGuidelines>`, etc.). Tag names are converted to snake_case keys automatically (e.g. `<supportInstruction>` → `support_instruction`).
+* `<phrases>` — Optional list of `<phrase>` elements that become the “approved phrases” guidance in prompts.
+* `<knowledge>` — Optional list of `<snippet>` (or any child tag) entries describing knowledge seeds. Provide child elements such as `<title>`, `<summary>`, `<body>`, `<steps>`, `<tip>`, and `<tags>`; the ingest loop composes these into embedded knowledge chunks for RAG.
 
-When you call `/chat`, pass the same folder name (e.g. `"ol_residential_broadband"`). There is no default persona; requests must always specify which persona to use.
+Only content from `profile.xml` is required for manual personas now, keeping Drive folders clean. Legacy `profile.txt` / `common_phrases.txt` files are still ingested for backward compatibility, but new personas should use the XML format exclusively.
+
+When you call `/chat`, pass the same folder name (e.g. `"ol_residential_broadband"`). There is no default persona; requests must always specify which persona to use. Sample persona XML definitions live under `examples/personas/` (`raspberry_pi_customer.xml`, `troubleshooting_agent.xml`, `airtel_support.xml`) to help you get started.
 
 ### Hybrid retrieval + validation gates
 
@@ -119,7 +121,7 @@ When you call `/chat`, pass the same folder name (e.g. `"ol_residential_broadban
   3. `context_precision` heuristic measuring term overlap ( <0.40 escalates, <0.60 replies with a LOW confidence preamble).
 * When any gate fails the request is escalated deterministically with the failing metrics embedded into the GLPI ticket body.
 * The generation prompt uses **Self-RAG reflection tokens**: the model must emit `[RELEVANT]/[IRRELEVANT]` before answering and `[GROUNDED]/[UNGROUNDED]` afterwards. `[IRRELEVANT]` or `[UNGROUNDED]` forces a human escalation.
-* After generation, a groundedness heuristic computes a score; `GROUNDING_FAIL_THRESHOLD` (default `0.60`) triggers escalation, while scores between 0.60–0.85 prepend a limited-confidence warning.
+* After generation, a groundedness heuristic computes a score; `GROUNDING_FAIL_THRESHOLD` (default `0.60`) triggers escalation, while scores between 0.60–0.85 mark the response as LOW confidence so the router can decide whether to defer escalation.
 * Responses always cite chunks as `[kb_doc_###]`. The raw response payload exposes those chunks so clients can render inline references.
 
 Environment knobs:
