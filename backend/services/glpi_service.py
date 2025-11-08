@@ -526,11 +526,13 @@ class GLPIEscalationManager:
         }
 
     def send_customer_response(self, ticket_id: Any, message: str) -> bool:
+        # Prepend USER: prefix so GLPI agents can identify customer messages in timeline
+        formatted_message = f"USER: {message}"
         followup_payload = {
             "input": {
                 "itemtype": "Ticket",
                 "items_id": ticket_id,
-                "content": message,
+                "content": formatted_message,
             }
         }
         try:
