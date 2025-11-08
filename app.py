@@ -33,8 +33,6 @@ from services.rag_pipeline import (
     parse_self_rag_tokens,
 )
 
-# FSM removed: system now uses KB + router decisions only (no FSM)
-
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
@@ -598,7 +596,6 @@ def construct_support_messages(
     persona_name: str,
     router_payload: Optional[Dict[str, Any]] = None,
 ):
-    # FSM removed: messages are driven by persona config + KB retrieval + router.
     instruction = (
         "Answer the user's query using ONLY the provided knowledge snippets. "
         "If the knowledge is insufficient, say you don't have enough information and recommend escalation."
@@ -834,10 +831,10 @@ def _check_glpi():
     return glpi_client.health_check()
 
 
-FINAL_STATE_RESPONSES = {
-    'FinalState_Resolved': "Glad we could get that sorted. If anything else breaks, just send another message here.",
-    'FinalState_Escalated': "I've captured the diagnostics and looped in a human specialist. They'll reach out shortly.",
-    'FinalState_FollowUp': "I'll monitor things on our side. If the issue returns, share any new symptoms and we'll dig deeper.",
+ASSISTANT_OUTCOME_RESPONSES = {
+    'resolved': "Glad we could get that sorted. If anything else breaks, just send another message here.",
+    'escalated': "I've captured the diagnostics and looped in a human specialist. They'll reach out shortly.",
+    'follow_up': "I'll monitor things on our side. If the issue returns, share any new symptoms and we'll dig deeper.",
 }
 
 
@@ -1018,8 +1015,6 @@ def chat_handler():
     user_profile["user_id"] = user_id
     user_profile["message_count"] = user_profile.get("message_count", 0) + 1
 
-    # No FSM: infer tone and persist message_count only. Flow decisions are
-    # governed by RAG and the ticket router (KB-driven multi-persona behavior).
     try:
         tone_info = infer_conversation_tone(history)
         db[USER_PROFILES_COL].update_one(
@@ -1045,6 +1040,29 @@ def chat_handler():
         response_prefix = rag_context.get("response_prefix", "")
         rag_reason = rag_context.get("reason")
         rag_escalation = rag_context.get("decision") == "escalate"
+
+        # Router-assistive override: if the ticket router marked this turn as
+        # assistive and RAG's max_similarity is reasonably high, allow the
+        # assistant to respond instead of escalating. This helps when the
+        # KB match is useful but below the strict RAG thresholds.
+        try:
+            if rag_escalation and router_payload and router_payload.get("assistive"):
+                max_sim = (rag_context.get("metrics") or {}).get("max_similarity")
+                # Fallback to looking at similarity scores list if max_similarity missing
+                if max_sim is None:
+                    sims = (rag_context.get("metrics") or {}).get("similarity_scores") or []
+                    max_sim = max(sims) if sims else 0.0
+                if float(max_sim or 0.0) >= 0.45:
+                    logging.info(
+                        "Router-assistive override applied (max_similarity=%.3f) for user %s persona %s",
+                        float(max_sim), user_id, persona_name,
+                    )
+                    rag_context["decision"] = "proceed"
+                    rag_context["reason"] = (rag_context.get("reason") or "") + " | overridden_by_router_assistive"
+                    rag_escalation = False
+        except Exception as _:
+            # Defensive: if any of the metrics shape is unexpected, do not crash the handler.
+            logging.debug("Router assistive override check failed; continuing without override.")
 
         router_payload = None
         if ticket_router and user_message:
@@ -1077,9 +1095,8 @@ def chat_handler():
 
         glpi_ticket_id = None
         if should_escalate:
-            # Escalation decision taken based on RAG/router; no FSM state change.
             reason_text = "; ".join(escalation_reasons)
-            pending_reply = FINAL_STATE_RESPONSES['FinalState_Escalated']
+            pending_reply = ASSISTANT_OUTCOME_RESPONSES['escalated']
             glpi_ticket_id = record_escalation_case(
                 user_id,
                 persona_name,
@@ -1099,7 +1116,6 @@ def chat_handler():
             response_content = "Here's what typically fixes this scenario:\n" + router_payload["resolution_proposal"]
             persist_rag_metrics(user_id, persona_name, rag_context, False, None)
         else:
-            # Normal respond flow: build LLM messages without any FSM state.
             llm_messages = construct_support_messages(
                 model_settings,
                 history,
@@ -1146,7 +1162,6 @@ def chat_handler():
                 )
 
             if late_escalation_reason:
-                # If LLM or grounding indicates a late escalation, record it. No FSM involved.
                 glpi_ticket_id = record_escalation_case(
                     user_id,
                     persona_name,
@@ -1155,9 +1170,9 @@ def chat_handler():
                     router_payload,
                     rag_context=rag_context,
                     escalation_reason=late_escalation_reason,
-                    assistant_reply=FINAL_STATE_RESPONSES['FinalState_Escalated'],
+                    assistant_reply=ASSISTANT_OUTCOME_RESPONSES['escalated'],
                 )
-                response_content = FINAL_STATE_RESPONSES['FinalState_Escalated']
+                response_content = ASSISTANT_OUTCOME_RESPONSES['escalated']
                 if glpi_ticket_id:
                     response_content += f" Reference ticket #{glpi_ticket_id}."
                 persist_rag_metrics(user_id, persona_name, rag_context, True, late_escalation_reason)
@@ -1167,7 +1182,6 @@ def chat_handler():
                 persist_rag_metrics(user_id, persona_name, rag_context, False, None)
 
         save_message_to_history(user_id, "assistant", response_content)
-        # Persist assistant reply timestamp/meta but do not use FSM state.
         db[USER_PROFILES_COL].update_one(
             {"user_id": user_id},
             {"$set": {"last_bot_reply": datetime.now(timezone.utc)}},

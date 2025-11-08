@@ -2,7 +2,7 @@
 
 # Usage Guide — Obvix Lake Conversational Orchestrator
 
-This service orchestrates end-to-end support conversations with a single endpoint. Every turn runs through the ticket router, support FSM, and RAG stack so the bot can either auto-resolve by citing knowledge or escalate with the full diagnostic trace.
+This service orchestrates end-to-end support conversations with a single endpoint. Every turn now flows through the ticket router, hybrid RAG stack, and validation gates so the bot can either auto-resolve by citing knowledge or escalate with the full diagnostic trace—no finite-state machine required.
 
 It continually enriches a lightweight CRM / ticket profile in MongoDB and uses that memory to personalize every reply.
 
@@ -26,7 +26,6 @@ It continually enriches a lightweight CRM / ticket profile in MongoDB and uses t
 ```json
 {
   "message": "assistant's reply text",
-  "fsm_state": "Phase2_Diagnostics",
   "confidence": "HIGH",
   "sources": [
     {"id": "kb_doc_001", "source": "ticket_12345", "preview": "Reboot firewall and reapply policy"}
@@ -68,32 +67,28 @@ All operational endpoints return JSON and reuse the same auth context as `/chat`
 
 ---
 
-## 2) Support Conversation Lifecycle (FSM)
+## 2) Support Conversation Flow
 
-Every `/chat` request flows through a single support-focused FSM. The states you will see in responses are:
+Every `/chat` request is steered by three building blocks instead of an explicit state machine:
 
-* `Phase0_Greeting` – welcome message plus disclosure of the persona.
-* `Phase1_IssueIntake` – gather problem details (device, location, impact, error codes).
-* `Phase2_Diagnostics` – step-by-step checks to narrow the root cause.
-* `Phase3_SolutionProposal` – share the fix grounded in Drive/GLPI knowledge.
-* `Phase4_Confirmation` – verify that the solution worked or ask for one missing signal.
-* `Phase5_Closing` – summarize actions and set monitoring expectations.
-* Final states: `FinalState_Resolved`, `FinalState_Escalated`, `FinalState_FollowUp`.
+* **Ticket router signals** – classification (`issue_category`, `impact_scope`, `requires_human`, etc.) plus optional auto-resolution snippets.
+* **Hybrid RAG retrieval + validation** – semantic + lexical retrieval, LLM relevance judge, and grounding score thresholds.
+* **Outcome resolver** – chooses between (a) answering with numbered guidance, (b) returning the router’s resolution verbatim, or (c) escalating with a GLPI ticket when confidence is too low.
 
-The FSM advances automatically based on heuristics (message count, stored context) or jumps straight to a final state when the router decides that a human must take over. The assistant never shifts into a sales/CTA mode anymore.
+Persona prompts govern pacing and recap behavior, so the dialog feels stateful without keeping an explicit state machine in memory.
 
 ---
 
 ## 3) Ticket Router & Auto-Resolution
 
-Before the FSM speaks, the ticket text is scored by `services/ticket_router.TicketRouter`:
+Before the assistant replies, the ticket text is scored by `services/ticket_router.TicketRouter`:
 
 * Multi-dimensional classifier returns `issue_category`, `issue_type`, `urgency`, `impact_scope`, `sentiment`, `requires_human`, `needs_supervisor`, and `confidence`.
 * Semantic similarity search (same persona partition) surfaces the top knowledge chunks plus any GLPI-derived snippets published by the knowledge pipeline.
 * Decisions:
   * **Auto-resolved** – if similarity ≥ threshold and `requires_human` is false, the assistant replies directly with the matching fix.
-  * **Human required** – if `needs_supervisor` or `requires_human` is true, the FSM enters `FinalState_Escalated` and the reply confirms the handoff.
-  * **Assistive mode** – otherwise the FSM continues and the router context is embedded into the LLM prompt so diagnostics reference the suggested articles.
+  * **Human required** – if `needs_supervisor` or `requires_human` is true, the system escalates immediately and the reply confirms the handoff.
+  * **Assistive mode** – otherwise the router context is embedded into the LLM prompt so diagnostics reference the suggested articles.
 
 You can also call the router directly through `POST /tickets/route` for standalone experiments.
 
@@ -136,7 +131,7 @@ Environment knobs:
 
 ## 5) Tone Inference
 
-The tone detector remains active (same schema as before) and writes `tone_observed` back to `user_profiles`. The FSM references this field plus any stored `tone_preference` to keep responses on-brand even across escalations.
+The tone detector remains active (same schema as before) and writes `tone_observed` back to `user_profiles`. The prompt builder references this field plus any stored `tone_preference` to keep responses on-brand even across escalations.
 
 ---
 
@@ -169,7 +164,7 @@ All under MongoDB collection `user_profiles`:
 
 **Operational**
 
-* `message_count`, `fsm_state`
+* `message_count`
 * Optional fields you add for analytics (e.g., `intake_notes_captured`, `diagnostics_completed`)
 
 > The system **auto-enriches** these fields every turn by extracting from the latest message + short history and by inferring tone/intent. When present, these values are fed back into prompts to personalize replies.
@@ -194,16 +189,16 @@ Tone is matched using `tone_preference` or `tone_observed`.
 ```
 POST /chat {"user_id":"cust_nina_01","persona_name":"ol_technical_and_diagnostics","message":"VPN fails with error 812 on Windows"}
 → TicketRouter finds a high-similarity GLPI snippet, decision=auto_resolved
-← Response: "Here's what typically fixes this scenario" + remediation steps, FSM jumps to FinalState_Resolved.
+← Response: "Here's what typically fixes this scenario" + remediation steps. Outcome logged as `auto_resolved`.
 ```
 
 ### Guided diagnostics
 
 ```
-Turn 1: user greets → FSM in Phase0_Greeting.
-Turn 2: user explains "5G router keeps rebooting" → FSM moves to Phase1_IssueIntake asking for model/LED state.
-Turn 3: user supplies photos → FSM moves to Phase2_Diagnostics, provides numbered checks.
-Turn 4: once telemetry sufficient, FSM transitions to Phase3_SolutionProposal and cites the router context + Drive doc.
+Turn 1: user greets → assistant introduces the persona and sets expectations.
+Turn 2: user explains "5G router keeps rebooting" → assistant gathers device and LED details.
+Turn 3: user supplies photos → assistant provides numbered diagnostics grounded in the retrieved snippets.
+Turn 4: once telemetry is sufficient, assistant shares the recommended fix citing the router context + Drive doc.
 ```
 
 ### Escalation
@@ -211,7 +206,7 @@ Turn 4: once telemetry sufficient, FSM transitions to Phase3_SolutionProposal an
 ```
 User: “Multiple branches offline; MPLS circuit down, carrier ticket #4390.”
 → Router classification: impact_scope=systemwide, needs_supervisor=true
-→ FSM moves straight to FinalState_Escalated and reply confirms human takeover.
+→ System escalates immediately, creates a GLPI ticket, and the reply confirms human takeover.
 ```
 
 ---
@@ -236,14 +231,14 @@ User: “Multiple branches offline; MPLS circuit down, carrier ticket #4390.”
 | Needs/Context | `use_case, product_interest, needs, wants, pain_points, budget, plan_speed, timeline, installation_time_preference, preferred_contact_time, current_provider, devices_count, household_size` |
 | Persona/Ticket| `last_router_decision, last_support_handoff, last_support_attempt, last_intent (optional legacy)`                                                                                            |
 | Tone/Intent   | `tone_preference, tone_observed, needs_supervisor, classifier_confidence`                                                                                                                   |
-| Ops/States    | `message_count, fsm_state, intake_notes_captured, diagnostics_completed`                                                                                                                    |
+| Ops/Progress  | `message_count, intake_notes_captured, diagnostics_completed`                                                                                                                               |
 
 ---
 
 ## 11) What to Log/Watch
 
 * Router decision drift (e.g., spike in `requires_human` for easy categories).
-* FSM stalls (stuck in `Phase1_IssueIntake` for many turns) – usually indicates missing context fields.
+* Repeated diagnostic loops without progress – usually indicates missing context fields or low-quality knowledge snippets.
 * RAG coverage gaps – when replies fall back to generic guidance, add docs to the persona Drive or ensure GLPI pipelines are populating new fixes.
 
 ---
