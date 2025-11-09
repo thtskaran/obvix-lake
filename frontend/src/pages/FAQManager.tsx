@@ -157,11 +157,11 @@ export const FAQManager = () => {
         {/* Header Section - Fixed height and better spacing */}
         <div className="flex flex-col lg:flex-row lg:justify-between lg:items-start gap-4 mb-8">
           <div className="space-y-1">
-            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-semibold text-[#333333] dark:text-white tracking-tight">
-              AI-Powered FAQ Manager
+            <h1 className="text-2xl sm:text-3xl font-semibold text-[#333333] dark:text-white tracking-tight">
+              FAQ Manager
             </h1>
             <p className="text-[#6b5f57] dark:text-slate-400 text-sm lg:text-base">
-              Manage knowledge base, approve AI-generated solutions, and optimize customer self-service
+              Manage frequently asked questions and review suggested answers
             </p>
           </div>
           
@@ -182,7 +182,7 @@ export const FAQManager = () => {
           <div className="space-y-5">
             {/* FAQ Categories */}
             <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-5 hover:shadow-lg transition-shadow duration-200">
-              <h2 className="text-lg font-semibold text-[#333333] dark:text-white mb-4">FAQ Categories</h2>
+              <h2 className="text-lg font-semibold text-[#333333] dark:text-white mb-4">Categories</h2>
               
               <div className="space-y-2">
                 {categories.map((category) => {
@@ -225,38 +225,29 @@ export const FAQManager = () => {
               </div>
             </div>
 
-            {/* AI Learning Stats - Reduced size */}
+            {/* Stats */}
             <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-5 hover:shadow-lg transition-shadow duration-200">
-              <h2 className="text-lg font-semibold text-[#333333] dark:text-white mb-4">AI Learning Stats</h2>
+              <h2 className="text-lg font-semibold text-[#333333] dark:text-white mb-4">Stats</h2>
               
               <div className="space-y-3">
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-xs text-[#6b5f57] dark:text-slate-300">Documents Processed</span>
-                    <span className="text-xs font-semibold text-[#333333] dark:text-white">2,847</span>
-                  </div>
-                  <div className="w-full bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-1.5">
-                    <div className="bg-blue-500 h-1.5 rounded-full transition-all duration-300" style={{width: '87%'}}></div>
+                    <span className="text-xs text-[#6b5f57] dark:text-slate-300">Total FAQs</span>
+                    <span className="text-xs font-semibold text-[#333333] dark:text-white">47</span>
                   </div>
                 </div>
 
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-xs text-[#6b5f57] dark:text-slate-300">Vector Embeddings</span>
-                    <span className="text-xs font-semibold text-[#333333] dark:text-white">156K</span>
-                  </div>
-                  <div className="w-full bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-1.5">
-                    <div className="bg-green-500 h-1.5 rounded-full transition-all duration-300" style={{width: '92%'}}></div>
+                    <span className="text-xs text-[#6b5f57] dark:text-slate-300">Pending Review</span>
+                    <span className="text-xs font-semibold text-[#333333] dark:text-white">2</span>
                   </div>
                 </div>
 
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-xs text-[#6b5f57] dark:text-slate-300">Learning Accuracy</span>
-                    <span className="text-xs font-semibold text-[#333333] dark:text-white">94.2%</span>
-                  </div>
-                  <div className="w-full bg-[#F5ECE5] dark:bg-slate-700 rounded-full h-1.5">
-                    <div className="bg-purple-500 h-1.5 rounded-full transition-all duration-300" style={{width: '94.2%'}}></div>
+                    <span className="text-xs text-[#6b5f57] dark:text-slate-300">Active</span>
+                    <span className="text-xs font-semibold text-[#333333] dark:text-white">45</span>
                   </div>
                 </div>
               </div>
@@ -285,8 +276,8 @@ export const FAQManager = () => {
             <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-5 hover:shadow-lg transition-shadow duration-200">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
                 <div>
-                  <h2 className="text-xl font-semibold text-[#333333] dark:text-white">Pending AI Approvals</h2>
-                  <p className="text-[#6b5f57] dark:text-slate-400 text-sm">FAQs learned from high-volume ticket patterns</p>
+                  <h2 className="text-xl font-semibold text-[#333333] dark:text-white">Pending Review</h2>
+                  <p className="text-[#6b5f57] dark:text-slate-400 text-sm">Suggested FAQs from ticket analysis</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse"></div>
@@ -308,9 +299,7 @@ export const FAQManager = () => {
                               {item.category}
                             </span>
                             <span className="text-[#6b5f57] dark:text-slate-400">•</span>
-                            <span className="text-[#6b5f57] dark:text-slate-400">Learned from {item.learnedFrom}</span>
-                            <span className="text-[#6b5f57] dark:text-slate-400">•</span>
-                            <span className="text-green-600 dark:text-green-300 font-medium">{item.confidence}% confidence</span>
+                            <span className="text-[#6b5f57] dark:text-slate-400">From {item.learnedFrom}</span>
                           </div>
                         </div>
                         
@@ -331,10 +320,6 @@ export const FAQManager = () => {
                       <p className="text-[#6b5f57] dark:text-slate-300 text-sm bg-white/50 dark:bg-slate-800/50 p-3 rounded-lg leading-relaxed">
                         {item.preview}
                       </p>
-                      
-                      <div className="text-xs text-[#6b5f57] dark:text-slate-400">
-                        <span className="font-medium">Pattern:</span> {item.ticketPattern}
-                      </div>
                     </div>
                   </div>
                 ))}
@@ -345,17 +330,14 @@ export const FAQManager = () => {
             <div className="bg-white dark:bg-slate-800/40 backdrop-blur-2xl border border-[#F5ECE5] dark:border-slate-600/40 rounded-2xl p-5 hover:shadow-lg transition-shadow duration-200">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
                 <div>
-                  <h2 className="text-xl font-semibold text-[#333333] dark:text-white">Active Knowledge Base</h2>
+                  <h2 className="text-xl font-semibold text-[#333333] dark:text-white">Active FAQs</h2>
                   <p className="text-[#6b5f57] dark:text-slate-400 text-sm">
-                    {selectedCategory === "all" ? "All categories" : categories.find(c => c.id === selectedCategory)?.name} • Vector-embedded for AI retrieval
+                    {selectedCategory === "all" ? "All categories" : categories.find(c => c.id === selectedCategory)?.name}
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                  <span className="text-xs font-medium text-green-600 dark:text-green-300 bg-green-100 dark:bg-green-500/20 px-2 py-1 rounded-lg">
-                    Live
-                  </span>
-                </div>
+                <span className="text-xs font-medium text-green-600 dark:text-green-300 bg-green-100 dark:bg-green-500/20 px-2 py-1 rounded-lg">
+                  Active
+                </span>
               </div>
 
               <div className="space-y-3">
@@ -369,24 +351,13 @@ export const FAQManager = () => {
                             <span className="text-blue-600 dark:text-blue-300 bg-blue-100 dark:bg-blue-500/20 px-2 py-1 rounded">
                               {faq.category}
                             </span>
-                            <span className="text-[#6b5f57] dark:text-slate-300">{faq.usage} uses</span>
                           </div>
                         </div>
                         
                         <p className="text-[#6b5f57] dark:text-slate-300 text-sm leading-relaxed">{faq.content}</p>
                         
-                        <div className="flex flex-wrap items-center gap-1">
-                          {faq.tags.map((tag, index) => (
-                            <span key={index} className="text-xs font-medium text-[#6b5f57] dark:text-slate-400 bg-white dark:bg-slate-800/50 px-2 py-1 rounded border border-[#F5ECE5] dark:border-slate-600/40">
-                              #{tag}
-                            </span>
-                          ))}
-                        </div>
-                        
-                        <div className="flex items-center gap-3 text-xs text-[#6b5f57] dark:text-slate-400">
-                          <span>Confidence: <span className="font-medium text-green-600 dark:text-green-400">{faq.confidence}%</span></span>
-                          <span>•</span>
-                          <span>Updated {faq.lastUpdated}</span>
+                        <div className="text-xs text-[#6b5f57] dark:text-slate-400">
+                          Used {faq.usage} times • Updated {faq.lastUpdated}
                         </div>
                       </div>
                       
@@ -406,27 +377,6 @@ export const FAQManager = () => {
                     </div>
                   </div>
                 ))}
-              </div>
-
-              {/* Knowledge Graph Status - Simplified */}
-              <div className="mt-5 pt-4 border-t border-[#F5ECE5] dark:border-slate-600/30">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="p-1.5 bg-blue-100 dark:bg-blue-500/20 rounded-lg">
-                      <svg className="w-4 h-4 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-[#333333] dark:text-white">Knowledge Graph</p>
-                      <p className="text-xs text-[#6b5f57] dark:text-slate-400">Vector embeddings synced</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
-                    <span className="text-xs font-medium text-green-600 dark:text-green-300">Connected</span>
-                  </div>
-                </div>
               </div>
             </div>
           </div>

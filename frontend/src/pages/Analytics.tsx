@@ -174,23 +174,22 @@ export const Analytics: React.FC = () => {
     <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_40%_30%,rgba(232,159,136,0.05),transparent)] dark:bg-[radial-gradient(circle_at_20%_50%,rgba(120,119,198,0.14),transparent)] opacity-60" />
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-10">
-        <header className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between mb-8">
-          <div className="space-y-2">
-            <h1 className="text-3xl sm:text-4xl font-semibold text-[#333333] dark:text-white tracking-tight">
-              Analytics & Trend Intelligence
+        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between mb-6">
+          <div className="space-y-1">
+            <h1 className="text-2xl sm:text-3xl font-semibold text-[#333333] dark:text-white tracking-tight">
+              Analytics
             </h1>
-            <p className="text-[#6b5f57] dark:text-slate-400 text-base lg:text-lg max-w-2xl">
-              Automated clustering and resolution metrics pulled live from the Flask `/metrics` and `/analytics/trends` endpoints.
-              Use these insights to prioritise playbook updates and knowledge curation.
+            <p className="text-[#6b5f57] dark:text-slate-400 text-sm lg:text-base max-w-2xl">
+              Insights from customer support patterns and ticket trends
             </p>
-            <p className="text-xs sm:text-sm text-[#9c8f86] dark:text-slate-500">
+            <p className="text-xs text-[#9c8f86] dark:text-slate-500">
               Last updated: {formatTimestamp(lastUpdated)}
             </p>
           </div>
           <div className="flex items-center gap-3">
             {isLoading && (
               <span className="text-xs font-medium text-[#E89F88] dark:text-blue-300 bg-[#E89F88]/10 dark:bg-blue-500/20 px-3 py-1 rounded-lg">
-                Syncing data…
+                Loading…
               </span>
             )}
             <button
@@ -202,7 +201,7 @@ export const Analytics: React.FC = () => {
               <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24" aria-hidden>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.992 0l3.536 3.536A8.25 8.25 0 0019.5 12.75" />
               </svg>
-              Refresh analytics
+              Refresh
             </button>
           </div>
         </header>
@@ -227,46 +226,46 @@ export const Analytics: React.FC = () => {
           <div className="space-y-10">
             <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 lg:gap-6">
               <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                  Tickets analysed
+                <h2 className="text-xs uppercase tracking-wide text-[#9c8f86] dark:text-slate-400">
+                  Total Tickets
                 </h2>
-                <p className="mt-3 text-3xl font-semibold text-[#333333] dark:text-white">{formatNumber(trendCounts.total)}</p>
-                <p className="mt-2 text-sm text-[#6b5f57] dark:text-slate-400">
-                  Across {formatNumber(trends.length)} live clusters
+                <p className="mt-2 text-2xl font-semibold text-[#333333] dark:text-white">{formatNumber(trendCounts.total)}</p>
+                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
+                  {formatNumber(trends.length)} topic clusters
                 </p>
               </article>
 
               <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                  Assistive rate (30d)
+                <h2 className="text-xs uppercase tracking-wide text-[#9c8f86] dark:text-slate-400">
+                  AI Success Rate
                 </h2>
-                <p className="mt-3 text-3xl font-semibold text-[#333333] dark:text-white">{formatPercent(metrics?.assistive_rate)}</p>
-                <p className="mt-2 text-sm text-[#6b5f57] dark:text-slate-400">{formatNumber(metrics?.assistive)} assistive · {formatNumber(metrics?.human_agent)} escalated</p>
+                <p className="mt-2 text-2xl font-semibold text-[#333333] dark:text-white">{formatPercent(metrics?.assistive_rate)}</p>
+                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">Last 30 days</p>
               </article>
 
               <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                  Average CSAT
+                <h2 className="text-xs uppercase tracking-wide text-[#9c8f86] dark:text-slate-400">
+                  Customer Satisfaction
                 </h2>
-                <p className="mt-3 text-3xl font-semibold text-[#333333] dark:text-white">{formatCsat(metrics?.avg_csat)}</p>
-                <p className="mt-2 text-sm text-[#6b5f57] dark:text-slate-400">Customer feedback over the last 30 days</p>
+                <p className="mt-2 text-2xl font-semibold text-[#333333] dark:text-white">{formatCsat(metrics?.avg_csat)}</p>
+                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">Average rating</p>
               </article>
 
               <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                  Avg resolution time
+                <h2 className="text-xs uppercase tracking-wide text-[#9c8f86] dark:text-slate-400">
+                  Resolution Time
                 </h2>
-                <p className="mt-3 text-3xl font-semibold text-[#333333] dark:text-white">{formatHours(metrics?.avg_resolution_hours)}</p>
-                <p className="mt-2 text-sm text-[#6b5f57] dark:text-slate-400">GLPI ticket turnaround (solved tickets)</p>
+                <p className="mt-2 text-2xl font-semibold text-[#333333] dark:text-white">{formatHours(metrics?.avg_resolution_hours)}</p>
+                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">Average time</p>
               </article>
             </section>
 
             <section className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 shadow-sm overflow-hidden">
               <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 py-4 border-b border-[#F5ECE5] dark:border-slate-700">
                 <div>
-                  <h2 className="text-xl font-semibold text-[#333333] dark:text-white">Trend clusters</h2>
+                  <h2 className="text-lg font-semibold text-[#333333] dark:text-white">Ticket Topics</h2>
                   <p className="text-sm text-[#6b5f57] dark:text-slate-400">
-                    Derived from GLPI resolution embeddings using MiniBatchKMeans (services/analytics.TrendAnalyzer)
+                    Common themes identified from support interactions
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2 text-xs text-[#6b5f57] dark:text-slate-400">
@@ -288,19 +287,16 @@ export const Analytics: React.FC = () => {
                     <thead className="bg-[#FDF7F4] dark:bg-slate-800/70">
                       <tr>
                         <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                          Cluster label
+                          Topic
                         </th>
                         <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                          Tickets
+                          Count
                         </th>
                         <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                          Trend
+                          Status
                         </th>
                         <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                          Top entities
-                        </th>
-                        <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider text-[#9c8f86] dark:text-slate-400">
-                          Last updated
+                          Keywords
                         </th>
                       </tr>
                     </thead>
@@ -311,14 +307,8 @@ export const Analytics: React.FC = () => {
                           <tr key={`${cluster.cluster_id}-${cluster.label}`} className="hover:bg-[#FDF7F4]/70 dark:hover:bg-slate-800/50 transition">
                             <td className="px-5 py-4 align-top">
                               <div className="text-sm font-semibold text-[#333333] dark:text-white">
-                                {cluster.label || `Cluster #${cluster.cluster_id}`}
+                                {cluster.label || `Topic ${cluster.cluster_id}`}
                               </div>
-                              {cluster.ticket_ids.length > 0 && (
-                                <div className="mt-1 text-xs text-[#9c8f86] dark:text-slate-500">
-                                  Sample tickets: {cluster.ticket_ids.slice(0, 3).join(", ")}
-                                  {cluster.ticket_ids.length > 3 ? "…" : ""}
-                                </div>
-                              )}
                             </td>
                             <td className="px-5 py-4 text-sm text-[#6b5f57] dark:text-slate-300 align-top">
                               {formatNumber(cluster.size)}
@@ -331,7 +321,7 @@ export const Analytics: React.FC = () => {
                             </td>
                             <td className="px-5 py-4 align-top">
                               <div className="flex flex-wrap gap-2">
-                                {cluster.top_entities.slice(0, 5).map((entity) => (
+                                {cluster.top_entities.slice(0, 3).map((entity) => (
                                   <span
                                     key={entity}
                                     className="rounded-full bg-[#E89F88]/15 dark:bg-blue-500/15 px-3 py-1 text-xs text-[#E06F4F] dark:text-blue-200"
@@ -340,12 +330,9 @@ export const Analytics: React.FC = () => {
                                   </span>
                                 ))}
                                 {!cluster.top_entities.length && (
-                                  <span className="text-xs text-[#9c8f86] dark:text-slate-500">No entities extracted</span>
+                                  <span className="text-xs text-[#9c8f86] dark:text-slate-500">None</span>
                                 )}
                               </div>
-                            </td>
-                            <td className="px-5 py-4 text-sm text-[#6b5f57] dark:text-slate-300 align-top">
-                              {formatTimestamp(cluster.last_updated)}
                             </td>
                           </tr>
                         );
@@ -355,45 +342,45 @@ export const Analytics: React.FC = () => {
                 </div>
               ) : (
                 <div className="p-8 text-center text-sm text-[#6b5f57] dark:text-slate-400">
-                  No GLPI resolutions have been clustered yet. As soon as tickets close and embeddings are available, clusters will appear here automatically.
+                  No topics detected yet. They will appear as we process support tickets.
                 </div>
               )}
             </section>
 
             <section className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
-              <h2 className="text-lg font-semibold text-[#333333] dark:text-white">Highlights</h2>
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+              <h2 className="text-lg font-semibold text-[#333333] dark:text-white mb-4">Summary</h2>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <article className="rounded-xl border border-[#F5ECE5] dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-[#9c8f86] dark:text-slate-400 uppercase tracking-wider">Most active cluster</h3>
+                  <h3 className="text-xs uppercase tracking-wide text-[#9c8f86] dark:text-slate-400">Most Active</h3>
                   {topCluster ? (
                     <div className="mt-2">
-                      <p className="text-base font-semibold text-[#333333] dark:text-white">{topCluster.label || `Cluster #${topCluster.cluster_id}`}</p>
-                      <p className="text-sm text-[#6b5f57] dark:text-slate-400 mt-1">{formatNumber(topCluster.size)} tickets · updated {formatTimestamp(topCluster.last_updated)}</p>
+                      <p className="text-sm font-semibold text-[#333333] dark:text-white">{topCluster.label || `Topic ${topCluster.cluster_id}`}</p>
+                      <p className="text-xs text-[#6b5f57] dark:text-slate-400 mt-1">{formatNumber(topCluster.size)} tickets</p>
                     </div>
                   ) : (
-                    <p className="mt-2 text-sm text-[#6b5f57] dark:text-slate-400">No clusters detected.</p>
+                    <p className="mt-2 text-sm text-[#6b5f57] dark:text-slate-400">None detected</p>
                   )}
                 </article>
 
                 <article className="rounded-xl border border-[#F5ECE5] dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-[#9c8f86] dark:text-slate-400 uppercase tracking-wider">Knowledge velocity</h3>
-                  <p className="mt-2 text-base font-semibold text-[#333333] dark:text-white">
+                  <h3 className="text-xs uppercase tracking-wide text-[#9c8f86] dark:text-slate-400">Knowledge Growth</h3>
+                  <p className="mt-2 text-sm font-semibold text-[#333333] dark:text-white">
                     {metrics?.knowledge_growth_ratio !== undefined && metrics?.knowledge_growth_ratio !== null
-                      ? `${metrics.knowledge_growth_ratio.toFixed(2)}×`
+                      ? `${metrics.knowledge_growth_ratio.toFixed(1)}×`
                       : "—"}
                   </p>
-                  <p className="text-sm text-[#6b5f57] dark:text-slate-400 mt-1">
-                    Ratio of GLPI auto-published knowledge vs manual KB entries
+                  <p className="text-xs text-[#6b5f57] dark:text-slate-400 mt-1">
+                    Ratio this month
                   </p>
                 </article>
 
                 <article className="rounded-xl border border-[#F5ECE5] dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-[#9c8f86] dark:text-slate-400 uppercase tracking-wider">Cluster coverage</h3>
-                  <p className="mt-2 text-base font-semibold text-[#333333] dark:text-white">
+                  <h3 className="text-xs uppercase tracking-wide text-[#9c8f86] dark:text-slate-400">Active Topics</h3>
+                  <p className="mt-2 text-sm font-semibold text-[#333333] dark:text-white">
                     {formatPercent(trends.length ? (trendCounts.growing + trendCounts.emerging) / trends.length : 0)}
                   </p>
-                  <p className="text-sm text-[#6b5f57] dark:text-slate-400 mt-1">
-                    Share of clusters that are growing or emerging (watch list)
+                  <p className="text-xs text-[#6b5f57] dark:text-slate-400 mt-1">
+                    Growing or emerging
                   </p>
                 </article>
               </div>

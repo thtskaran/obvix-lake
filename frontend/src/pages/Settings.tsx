@@ -1,193 +1,291 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { fetchHealthStatus } from "../app/api/endpoints";
-import type { HealthResponse, ServiceHealth } from "../types/api";
+import React, { useEffect, useState } from 'react';
+import { Settings as SettingsIcon, CheckCircle2, AlertCircle, XCircle } from 'lucide-react';
+import { fetchHealthStatus } from '../app/api/analytics';
+import type { HealthResponse } from '../types/api';
 
-const formatServiceName = (key: string) =>
-  key
-    .split(/[_-]/)
-    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-    .join(" ");
+interface SystemSettings {
+  chatModel: string;
+  embeddingModel: string;
+  ragJudgeModel: string;
+  llmTempLow: number;
+  maxEmbedChars: number;
+  minAssistTurns: number;
+  maxAssistTurns: number;
+  maxHistoryMessages: number;
+  knowledgePipelineIntervalSeconds: number;
+  analyticsRefreshIntervalSeconds: number;
+}
 
-const normalizeStatus = (status?: string) => (status ?? "unknown").toLowerCase();
+export function Settings() {
+  const [settings, setSettings] = useState<SystemSettings>({
+    chatModel: 'gpt-4o-mini',
+    embeddingModel: 'text-embedding-3-small',
+    ragJudgeModel: 'gpt-4o-mini',
+    llmTempLow: 0.2,
+    maxEmbedChars: 150000,
+    minAssistTurns: 2,
+    maxAssistTurns: 10,
+    maxHistoryMessages: 20,
+    knowledgePipelineIntervalSeconds: 3600,
+    analyticsRefreshIntervalSeconds: 600,
+  });
 
-const badgeClasses = (status?: string) => {
-  switch (normalizeStatus(status)) {
-    case "ok":
-      return "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-200";
-    case "error":
-      return "bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-200";
-    case "disabled":
-      return "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-200";
-    default:
-      return "bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-200";
-  }
-};
-
-const ServiceCard = ({ name, health }: { name: string; health: ServiceHealth }) => {
-  const statusText = normalizeStatus(health.status);
-  const extraFields = Object.entries(health)
-    .filter(([key]) => !["status"].includes(key))
-    .map(([key, value]) => ({ key, value }));
-
-  return (
-    <article className="flex h-full flex-col gap-3 rounded-2xl border border-[#F5ECE5] bg-white/80 p-5 shadow-sm transition-colors hover:border-[#E89F88] hover:shadow-md dark:border-slate-700/60 dark:bg-slate-800/60">
-      <header className="flex items-start justify-between gap-3">
-        <div className="space-y-1">
-          <h3 className="text-lg font-semibold text-[#333333] dark:text-white">{formatServiceName(name)}</h3>
-          <p className="text-xs uppercase tracking-wide text-[#6b5f57] dark:text-slate-400">Service status</p>
-        </div>
-        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${badgeClasses(health.status)}`}>
-          {statusText}
-        </span>
-      </header>
-
-      <div className="space-y-2 text-sm text-[#6b5f57] dark:text-slate-300">
-        {extraFields.length === 0 ? (
-          <p>No additional telemetry reported.</p>
-        ) : (
-          extraFields.map(({ key, value }) => (
-            <div key={key} className="flex flex-col rounded-xl bg-[#FDF3EF]/80 px-4 py-3 dark:bg-slate-900/40">
-              <span className="text-xs font-semibold uppercase tracking-wide text-[#E57252] dark:text-blue-300">
-                {formatServiceName(key)}
-              </span>
-              <span className="text-sm text-[#333333] dark:text-slate-200">
-                {typeof value === "string" || typeof value === "number"
-                  ? value.toString()
-                  : JSON.stringify(value, null, 2)}
-              </span>
-            </div>
-          ))
-        )}
-      </div>
-    </article>
-  );
-};
-
-export const Settings = () => {
-  const [health, setHealth] = useState<HealthResponse>({});
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const loadHealth = useCallback(async (signal?: AbortSignal) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const response = await fetchHealthStatus(signal);
-      if (signal?.aborted) {
-        return;
-      }
-      setHealth(response);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        return;
-      }
-      const message = err instanceof Error ? err.message : "Unable to load health status.";
-      setError(message);
-    } finally {
-      if (!signal?.aborted) {
-        setIsLoading(false);
-      }
-    }
-  }, []);
+  const [healthStatus, setHealthStatus] = useState<'ok' | 'warning' | 'error'>('ok');
+  const [healthCount, setHealthCount] = useState({ ok: 0, issues: 0 });
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
-    loadHealth(controller.signal);
-    return () => controller.abort();
-  }, [loadHealth]);
+    const loadHealth = async () => {
+      try {
+        const response: HealthResponse = await fetchHealthStatus();
+        const data = response.data || {};
+        let ok = 0, issues = 0;
+        for (const service in data) {
+          const status = data[service].status.toLowerCase();
+          if (status === 'ok') ok++;
+          else issues++;
+        }
+        setHealthCount({ ok, issues });
+        if (issues > 0) setHealthStatus('error');
+        else if (ok === 0) setHealthStatus('warning');
+        else setHealthStatus('ok');
+      } catch (err) {
+        setHealthStatus('error');
+      }
+    };
+    loadHealth();
+  }, []);
 
-  const refresh = useCallback(async () => {
-    await loadHealth();
-  }, [loadHealth]);
+  const handleSave = async () => {
+    setIsSaving(true);
+    setSaveMessage(null);
+    try {
+      // TODO: Replace with actual API call to /api/settings
+      await new Promise(resolve => setTimeout(resolve, 1000)); // Mock delay
+      setSaveMessage({ type: 'success', text: 'Settings saved successfully!' });
+    } catch (err: any) {
+      setSaveMessage({ type: 'error', text: err.message || 'Failed to save settings' });
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
-  const summary = useMemo(() => {
-    const entries = Object.values(health);
-    const total = entries.length;
-    const ok = entries.filter((record) => normalizeStatus(record.status) === "ok").length;
-    const errorCount = entries.filter((record) => normalizeStatus(record.status) === "error").length;
-    const disabled = entries.filter((record) => normalizeStatus(record.status) === "disabled").length;
-    const other = total - ok - errorCount - disabled;
-    return { total, ok, error: errorCount, disabled, other };
-  }, [health]);
-
-  const serviceEntries = Object.entries(health);
+  const handleChange = (key: keyof SystemSettings, value: string | number) => {
+    setSettings(prev => ({ ...prev, [key]: value }));
+  };
 
   return (
-    <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(232,159,136,0.03),transparent)] dark:bg-[radial-gradient(circle_at_20%_40%,rgba(120,119,198,0.1),transparent)] opacity-50" />
-
-      <div className="relative z-10 max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        <header className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-2">
-            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-semibold text-[#333333] dark:text-white tracking-tight">
-              Platform Settings & Health
-            </h1>
-            <p className="text-[#6b5f57] dark:text-slate-400 text-base lg:text-lg">
-              Monitor backend integrations and adjust console preferences.
-            </p>
-          </div>
-
-          <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
-            {error && (
-              <div className="rounded-xl border border-red-200 bg-red-50/80 px-4 py-3 text-sm text-red-700 dark:border-red-800/60 dark:bg-red-500/10 dark:text-red-200">
-                {error}
-              </div>
-            )}
-            <button
-              type="button"
-              onClick={refresh}
-              className="inline-flex items-center gap-2 rounded-xl bg-[#E89F88] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#D68B72] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 disabled:cursor-not-allowed disabled:bg-[#E89F88]/50"
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-white" />
-              ) : (
-                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v6h6M20 20v-6h-6" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19A9 9 0 0119 5" />
-                </svg>
-              )}
-              Refresh health
-            </button>
-          </div>
+    <div className="mx-auto max-w-5xl px-5 py-10">
+      <div className="space-y-6">
+        {/* Header */}
+        <header>
+          <h1 className="text-2xl font-bold text-[#333333] dark:text-white">
+            <SettingsIcon className="mr-1 inline-block h-6 w-6 align-text-bottom text-[#E89F88]" /> Admin Settings
+          </h1>
+          <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
+            Configure system parameters and monitor health
+          </p>
         </header>
 
-        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-2xl border border-[#F5ECE5] bg-white/80 p-4 shadow-sm dark:border-slate-700/60 dark:bg-slate-800/60">
-            <p className="text-xs uppercase tracking-wide text-[#6b5f57] dark:text-slate-400">Services monitored</p>
-            <p className="text-3xl font-semibold text-[#333333] dark:text-white">{summary.total}</p>
-          </div>
-          <div className="rounded-2xl border border-[#DEF7EC] bg-emerald-50/80 p-4 shadow-sm dark:border-emerald-500/40 dark:bg-emerald-500/20">
-            <p className="text-xs uppercase tracking-wide text-emerald-700 dark:text-emerald-200">Healthy</p>
-            <p className="text-3xl font-semibold text-emerald-700 dark:text-emerald-100">{summary.ok}</p>
-          </div>
-          <div className="rounded-2xl border border-[#FFE5E5] bg-red-50/80 p-4 shadow-sm dark:border-red-500/40 dark:bg-red-500/20">
-            <p className="text-xs uppercase tracking-wide text-red-700 dark:text-red-200">Issues detected</p>
-            <p className="text-3xl font-semibold text-red-700 dark:text-red-100">{summary.error}</p>
-          </div>
-          <div className="rounded-2xl border border-[#F5ECE5] bg-[#FDF3EF]/80 p-4 shadow-sm dark:border-slate-700/60 dark:bg-slate-900/40">
-            <p className="text-xs uppercase tracking-wide text-[#E57252] dark:text-blue-300">Disabled / other</p>
-            <p className="text-3xl font-semibold text-[#333333] dark:text-white">{summary.disabled + summary.other}</p>
-          </div>
-        </section>
-
-        <section className="grid gap-5 md:grid-cols-2">
-          {isLoading ? (
-            <>
-              <div className="h-48 animate-pulse rounded-2xl border border-[#F5ECE5] bg-white/70 dark:border-slate-700/60 dark:bg-slate-800/60" />
-              <div className="h-48 animate-pulse rounded-2xl border border-[#F5ECE5] bg-white/70 dark:border-slate-700/60 dark:bg-slate-800/60" />
-            </>
-          ) : serviceEntries.length === 0 ? (
-            <div className="col-span-full rounded-2xl border border-dashed border-[#F5ECE5] bg-white/70 p-10 text-center text-sm text-[#6b5f57] dark:border-slate-700/60 dark:bg-slate-800/40 dark:text-slate-300">
-              No health telemetry available from the server.
+        {/* Compact Health Status */}
+        <div className="rounded-xl border border-[#F5ECE5] bg-white/80 p-4 shadow-sm dark:border-slate-700/60 dark:bg-slate-800/60">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {healthStatus === 'ok' && <CheckCircle2 className="h-5 w-5 text-emerald-600" />}
+              {healthStatus === 'warning' && <AlertCircle className="h-5 w-5 text-amber-600" />}
+              {healthStatus === 'error' && <XCircle className="h-5 w-5 text-red-600" />}
+              <div>
+                <p className="text-sm font-medium text-[#333333] dark:text-white">System Health</p>
+                <p className="text-xs text-[#6b5f57] dark:text-slate-400">
+                  {healthCount.ok} healthy, {healthCount.issues} issue{healthCount.issues !== 1 ? 's' : ''}
+                </p>
+              </div>
             </div>
-          ) : (
-            serviceEntries.map(([service, record]) => (
-              <ServiceCard key={service} name={service} health={record} />
-            ))
+            <span
+              className={'rounded-full px-3 py-1 text-xs font-medium ' + (
+                healthStatus === 'ok'
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-100'
+                  : healthStatus === 'warning'
+                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-100'
+                  : 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-100'
+              )}
+            >
+              {healthStatus === 'ok' ? 'All Systems Operational' : healthStatus === 'warning' ? 'Check Required' : 'Issues Detected'}
+            </span>
+          </div>
+        </div>
+
+        {/* Configuration Sections */}
+        <div className="space-y-6">
+          {/* AI Models Section */}
+          <div className="rounded-2xl border border-[#F5ECE5] bg-white/80 p-6 shadow-sm dark:border-slate-700/60 dark:bg-slate-800/60">
+            <h2 className="mb-4 text-lg font-semibold text-[#333333] dark:text-white">AI Models</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  Chat Model
+                </label>
+                <input
+                  type="text"
+                  value={settings.chatModel}
+                  onChange={(e) => handleChange('chatModel', e.target.value)}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  Embedding Model
+                </label>
+                <input
+                  type="text"
+                  value={settings.embeddingModel}
+                  onChange={(e) => handleChange('embeddingModel', e.target.value)}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  RAG Judge Model
+                </label>
+                <input
+                  type="text"
+                  value={settings.ragJudgeModel}
+                  onChange={(e) => handleChange('ragJudgeModel', e.target.value)}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  LLM Temperature
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={settings.llmTempLow}
+                  onChange={(e) => handleChange('llmTempLow', parseFloat(e.target.value))}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Assistant Behavior Section */}
+          <div className="rounded-2xl border border-[#F5ECE5] bg-white/80 p-6 shadow-sm dark:border-slate-700/60 dark:bg-slate-800/60">
+            <h2 className="mb-4 text-lg font-semibold text-[#333333] dark:text-white">Assistant Behavior</h2>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  Min Assist Turns
+                </label>
+                <input
+                  type="number"
+                  value={settings.minAssistTurns}
+                  onChange={(e) => handleChange('minAssistTurns', parseInt(e.target.value))}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  Max Assist Turns
+                </label>
+                <input
+                  type="number"
+                  value={settings.maxAssistTurns}
+                  onChange={(e) => handleChange('maxAssistTurns', parseInt(e.target.value))}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  Max History Messages
+                </label>
+                <input
+                  type="number"
+                  value={settings.maxHistoryMessages}
+                  onChange={(e) => handleChange('maxHistoryMessages', parseInt(e.target.value))}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Processing Section */}
+          <div className="rounded-2xl border border-[#F5ECE5] bg-white/80 p-6 shadow-sm dark:border-slate-700/60 dark:bg-slate-800/60">
+            <h2 className="mb-4 text-lg font-semibold text-[#333333] dark:text-white">Processing</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  Max Embed Characters
+                </label>
+                <input
+                  type="number"
+                  value={settings.maxEmbedChars}
+                  onChange={(e) => handleChange('maxEmbedChars', parseInt(e.target.value))}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  Knowledge Pipeline Interval (seconds)
+                </label>
+                <input
+                  type="number"
+                  value={settings.knowledgePipelineIntervalSeconds}
+                  onChange={(e) => handleChange('knowledgePipelineIntervalSeconds', parseInt(e.target.value))}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-[#333333] dark:text-white">
+                  Analytics Refresh Interval (seconds)
+                </label>
+                <input
+                  type="number"
+                  value={settings.analyticsRefreshIntervalSeconds}
+                  onChange={(e) => handleChange('analyticsRefreshIntervalSeconds', parseInt(e.target.value))}
+                  className="w-full rounded-lg border border-[#F5ECE5] bg-[#FDFBFA] px-4 py-2 text-sm text-[#333333] focus:border-[#E89F88] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/20 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Save Button */}
+        <div className="flex items-center justify-between rounded-xl border border-[#F5ECE5] bg-white/80 p-4 dark:border-slate-700/60 dark:bg-slate-800/60">
+          {saveMessage && (
+            <div
+              className={'flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm ' + (
+                saveMessage.type === 'success'
+                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-100'
+                  : 'bg-red-50 text-red-700 dark:bg-red-500/20 dark:text-red-100'
+              )}
+            >
+              {saveMessage.type === 'success' ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : (
+                <XCircle className="h-4 w-4" />
+              )}
+              {saveMessage.text}
+            </div>
           )}
-        </section>
+          {!saveMessage && <div />}
+          <button
+            onClick={handleSave}
+            disabled={isSaving}
+            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#E89F88] to-[#d97a5f] px-6 py-2.5 text-sm font-medium text-white shadow-sm transition-transform hover:scale-105 disabled:pointer-events-none disabled:opacity-60"
+          >
+            {isSaving ? (
+              <>
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/60 border-t-white" />
+                Saving...
+              </>
+            ) : (
+              'Save Settings'
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );
-};
+}

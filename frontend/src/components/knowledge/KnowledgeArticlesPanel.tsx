@@ -40,8 +40,6 @@ const normalizeTagsInput = (value: string): string[] =>
     .map((entry) => entry.trim())
     .filter(Boolean);
 
-const MAX_PREVIEW_CHARS = 420;
-
 export const KnowledgeArticlesPanel = ({ personas, defaultPersona, refreshToken = 0 }: KnowledgeArticlesPanelProps) => {
   const [articles, setArticles] = useState<KnowledgeArticle[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -147,9 +145,11 @@ export const KnowledgeArticlesPanel = ({ personas, defaultPersona, refreshToken 
   const renderFaq = (faq: KnowledgeArticleFaqEntry[] | undefined) => {
     if (!faq?.length) return null;
     return (
-      <div className="space-y-2 rounded-xl border border-[#F5ECE5] bg-[#FDF3EF]/60 p-3 dark:border-slate-700/60 dark:bg-slate-900/40">
-        <p className="text-xs font-semibold uppercase tracking-wide text-[#E57252] dark:text-blue-300">FAQ</p>
-        <ul className="space-y-2 text-sm text-[#333333] dark:text-slate-200">
+      <details className="rounded-xl border border-[#F5ECE5] bg-[#FDF3EF]/60 px-3 py-2 dark:border-slate-700/60 dark:bg-slate-900/40">
+        <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-[#E57252] dark:text-blue-300">
+          FAQ ({faq.length})
+        </summary>
+        <ul className="mt-3 space-y-2 text-sm text-[#333333] dark:text-slate-200">
           {faq.map((entry, index) => (
             <li key={`faq-${index}`}>
               <p className="font-semibold">Q: {entry.question ?? ""}</p>
@@ -157,23 +157,25 @@ export const KnowledgeArticlesPanel = ({ personas, defaultPersona, refreshToken 
             </li>
           ))}
         </ul>
-      </div>
+      </details>
     );
   };
 
   const renderOutline = (outline: KnowledgeArticleOutlineEntry[] | undefined) => {
     if (!outline?.length) return null;
     return (
-      <div className="space-y-2 rounded-xl border border-[#F5ECE5] bg-white/70 p-3 dark:border-slate-700/60 dark:bg-slate-900/40">
-        <p className="text-xs font-semibold uppercase tracking-wide text-[#E57252] dark:text-blue-300">Resolution Outline</p>
-        <ol className="list-decimal space-y-1 pl-5 text-sm text-[#333333] dark:text-slate-200">
+      <details className="rounded-xl border border-[#F5ECE5] bg-white/70 px-3 py-2 dark:border-slate-700/60 dark:bg-slate-900/40">
+        <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-[#E57252] dark:text-blue-300">
+          Resolution Steps ({outline.length})
+        </summary>
+        <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm text-[#333333] dark:text-slate-200">
           {outline.map((entry, index) => (
             <li key={`outline-${index}`}>
               <span className="font-semibold">{entry.title ?? `Step ${index + 1}`}.</span> {entry.details}
             </li>
           ))}
         </ol>
-      </div>
+      </details>
     );
   };
 
@@ -253,44 +255,39 @@ export const KnowledgeArticlesPanel = ({ personas, defaultPersona, refreshToken 
                   ) : (
                     <div>
                       <h2 className="text-lg font-semibold text-[#333333] dark:text-white">{article.title ?? "Untitled article"}</h2>
-                      {(() => {
-                        const baseText = article.summary ?? article.full_text_preview ?? "No summary provided.";
-                        const truncated = baseText.slice(0, MAX_PREVIEW_CHARS);
-                        const shouldTruncate = baseText.length > MAX_PREVIEW_CHARS;
-                        return (
-                          <p className="text-sm leading-relaxed text-[#6b5f57] dark:text-slate-300">
-                            {truncated}
-                            {shouldTruncate ? "…" : ""}
-                          </p>
-                        );
-                      })()}
+                      <p className="mt-1 text-sm leading-relaxed text-[#6b5f57] dark:text-slate-300">
+                        {article.summary?.slice(0, 150) ?? "No summary available"}
+                        {(article.summary?.length ?? 0) > 150 ? "…" : ""}
+                      </p>
                     </div>
                   )}
                 </header>
 
-                {isEditing ? (
+                {!isEditing && (
+                  <div className="space-y-2">
+                    {article.full_text && (
+                      <details className="rounded-xl border border-[#F5ECE5] bg-white/70 px-3 py-2 dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-300">
+                        <summary className="cursor-pointer text-sm font-semibold text-[#333333] dark:text-white">
+                          Full article
+                        </summary>
+                        <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-[#6b5f57] dark:text-slate-300">
+{article.full_text}
+                        </pre>
+                      </details>
+                    )}
+                    {renderOutline(article.resolution_outline)}
+                    {renderFaq(article.faq)}
+                  </div>
+                )}
+
+                {isEditing && (
                   <textarea
                     className="flex-1 rounded-xl border border-[#F5ECE5] bg-white px-3 py-2 text-sm text-[#333333] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-white"
                     placeholder="Full text"
                     value={editForm.full_text}
                     onChange={(event) => handleEditChange("full_text", event.target.value)}
                   />
-                ) : article.full_text ? (
-                  <details className="rounded-xl border border-[#F5ECE5] bg-white/70 px-4 py-3 text-sm text-[#6b5f57] dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-300">
-                    <summary className="flex cursor-pointer items-center justify-between text-sm font-semibold text-[#333333] dark:text-white">
-                      View full text
-                      <svg className="h-4 w-4 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </summary>
-                    <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-[#6b5f57] dark:text-slate-300">
-{article.full_text}
-                    </pre>
-                  </details>
-                ) : null}
-
-                {!isEditing && renderOutline(article.resolution_outline)}
-                {!isEditing && renderFaq(article.faq)}
+                )}
 
                 {isEditing && editForm && (
                   <div className="space-y-3">
@@ -314,10 +311,21 @@ export const KnowledgeArticlesPanel = ({ personas, defaultPersona, refreshToken 
                 )}
 
                 <footer className="mt-auto flex flex-col gap-3">
-                  <div className="flex flex-wrap justify-between gap-3 text-xs text-[#6b5f57] dark:text-slate-400">
-                    <span>Published {formatDate(article.published_at)}</span>
-                    <span>Updated {formatDate(article.updated_at)}</span>
-                  </div>
+                  {!isEditing && (
+                    <details className="rounded-xl border border-[#F5ECE5]/60 bg-white/50 px-3 py-2 dark:border-slate-700/40 dark:bg-slate-900/20">
+                      <summary className="cursor-pointer text-xs font-semibold text-[#6b5f57] dark:text-slate-400">
+                        Article metadata
+                      </summary>
+                      <div className="mt-2 space-y-1 text-xs text-[#6b5f57] dark:text-slate-400">
+                        <p>Published: {formatDate(article.published_at)}</p>
+                        <p>Updated: {formatDate(article.updated_at)}</p>
+                        {article.audience && <p>Audience: {article.audience}</p>}
+                        {article.tags && article.tags.length > 0 && (
+                          <p>Tags: {article.tags.join(", ")}</p>
+                        )}
+                      </div>
+                    </details>
+                  )}
                   {isEditing ? (
                     <div className="flex gap-3">
                       <button

@@ -5,7 +5,6 @@ import {
   MessageSquare,
   Database,
   Bot,
-  Plug,
   BarChart3,
   Settings,
   Menu,
@@ -25,7 +24,6 @@ const navigation = [
   { name: 'Tickets', href: '/tickets', icon: MessageSquare },
   { name: 'Assistant Chat', href: '/ai-learning', icon: Bot },
   { name: 'FAQ Manager', href: '/faq-manager', icon: FileQuestion }, // Add FAQ Manager
-  { name: 'Integrations', href: '/integrations', icon: Plug },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];

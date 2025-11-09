@@ -278,12 +278,19 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
                     </span>
                   )}
                 </header>
-                <pre className="whitespace-pre-wrap rounded-xl border border-[#F5ECE5] bg-[#FDF3EF]/70 p-3 text-sm text-[#333333] dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-200">
+                <details open className="rounded-xl border border-[#F5ECE5] bg-[#FDF3EF]/70 px-3 py-2 dark:border-slate-700/60 dark:bg-slate-900/40">
+                  <summary className="cursor-pointer text-sm font-semibold text-[#333333] dark:text-white">
+                    Chunk content
+                  </summary>
+                  <pre className="mt-2 whitespace-pre-wrap text-sm text-[#333333] dark:text-slate-200">
 {chunk.content ?? chunk.content_preview ?? "(empty chunk)"}
-                </pre>
+                  </pre>
+                </details>
                 {includeEmbedding && chunk.embedding && chunk.embedding.length > 0 && (
-                  <details className="rounded-xl border border-[#F5ECE5] bg-white/70 px-4 py-3 text-sm text-[#6b5f57] dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-300">
-                    <summary className="cursor-pointer text-sm font-semibold text-[#333333] dark:text-white">Embedding vector ({chunk.embedding.length} dims)</summary>
+                  <details className="rounded-xl border border-[#F5ECE5] bg-white/70 px-3 py-2 dark:border-slate-700/60 dark:bg-slate-900/40">
+                    <summary className="cursor-pointer text-sm font-semibold text-[#333333] dark:text-white">
+                      Embedding vector ({chunk.embedding.length} dims)
+                    </summary>
                     <div className="mt-2 max-h-48 overflow-auto text-xs">
                       <code className="whitespace-pre-wrap text-[#333333] dark:text-slate-200">{chunk.embedding.join(", ")}</code>
                     </div>

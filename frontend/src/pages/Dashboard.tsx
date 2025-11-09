@@ -174,10 +174,6 @@ export const Dashboard: React.FC = () => {
   const assists = metrics?.assistive ?? null;
   const escalations = metrics?.human_agent ?? null;
   const assistiveRate = metrics?.assistive_rate ?? null;
-  const escalationRate =
-    assistiveRate === null || assistiveRate === undefined
-      ? null
-      : Math.max(0, 1 - assistiveRate);
 
   const metricCards = useMemo(() => {
     if (!metrics) {
@@ -187,36 +183,36 @@ export const Dashboard: React.FC = () => {
     return [
       {
         id: "assistive",
-        title: "Assistive Success",
+        title: "AI Success Rate",
         value: formatPercent(metrics.assistive_rate),
-        description: `${formatNumber(metrics.assistive, "0")} handled automatically · ${formatNumber(
+        description: `${formatNumber(metrics.assistive, "0")} automated · ${formatNumber(
           metrics.human_agent,
           "0",
-        )} escalated`,
+        )} to agents`,
         accent: "from-emerald-400/15 via-emerald-400/10 to-emerald-500/5",
         indicator: "bg-emerald-400",
       },
       {
         id: "csat",
-        title: "Average CSAT",
+        title: "Customer Satisfaction",
         value: formatCsat(metrics.avg_csat),
-        description: "Customer feedback (last 30 days)",
+        description: "Average rating (30 days)",
         accent: "from-blue-400/15 via-blue-400/10 to-blue-500/5",
         indicator: "bg-blue-400",
       },
       {
         id: "resolution_time",
-        title: "Avg. Resolution Time",
+        title: "Resolution Time",
         value: formatHours(metrics.avg_resolution_hours),
-        description: "Closed GLPI tickets",
+        description: "Average time to close",
         accent: "from-amber-400/20 via-amber-400/10 to-amber-500/5",
         indicator: "bg-amber-400",
       },
       {
         id: "knowledge",
-        title: "Knowledge Growth",
+        title: "Knowledge Articles",
         value: formatRatio(metrics.knowledge_growth_ratio),
-        description: "Auto-published vs manual articles",
+        description: "Growth ratio this month",
         accent: "from-purple-400/20 via-purple-400/10 to-purple-500/5",
         indicator: "bg-purple-400",
       },
@@ -261,23 +257,22 @@ export const Dashboard: React.FC = () => {
     <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(232,159,136,0.05),transparent)] dark:bg-[radial-gradient(circle_at_20%_40%,rgba(120,119,198,0.12),transparent)] opacity-60" />
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-10">
-        <header className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between mb-8">
-          <div className="space-y-2">
-            <h1 className="text-3xl sm:text-4xl font-semibold text-[#333333] dark:text-white tracking-tight">
-              Operations Overview
+        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between mb-6">
+          <div className="space-y-1">
+            <h1 className="text-2xl sm:text-3xl font-semibold text-[#333333] dark:text-white tracking-tight">
+              Dashboard
             </h1>
-            <p className="text-[#6b5f57] dark:text-slate-400 text-base lg:text-lg max-w-2xl">
-              Live performance of the hybrid agent, ticket escalations, and knowledge pipeline—built straight from the
-              Flask backend metrics.
+            <p className="text-[#6b5f57] dark:text-slate-400 text-sm lg:text-base max-w-2xl">
+              Monitor system performance and customer support metrics
             </p>
-            <p className="text-xs sm:text-sm text-[#9c8f86] dark:text-slate-500">
-              Last synced: {formatTimestamp(lastUpdated)}
+            <p className="text-xs text-[#9c8f86] dark:text-slate-500">
+              Last updated: {formatTimestamp(lastUpdated)}
             </p>
           </div>
           <div className="flex items-center gap-3">
             {isLoading && (
               <span className="text-xs font-medium text-[#E89F88] dark:text-blue-300 bg-[#E89F88]/10 dark:bg-blue-500/20 px-3 py-1 rounded-lg">
-                Refreshing…
+                Updating…
               </span>
             )}
             <button
@@ -300,7 +295,7 @@ export const Dashboard: React.FC = () => {
                   d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.992 0l3.536 3.536A8.25 8.25 0 0019.5 12.75"
                 />
               </svg>
-              Refresh data
+              Refresh
             </button>
           </div>
         </header>
@@ -353,14 +348,14 @@ export const Dashboard: React.FC = () => {
             <section className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div>
-                  <h2 className="text-xl font-semibold text-[#333333] dark:text-white">Trending ticket themes</h2>
+                  <h2 className="text-xl font-semibold text-[#333333] dark:text-white">Trending Topics</h2>
                   <p className="text-sm text-[#6b5f57] dark:text-slate-400">
-                    Source: `/analytics/trends` clusters derived from GLPI resolution embeddings
+                    Common ticket themes from customer support
                   </p>
                 </div>
                 <span className="inline-flex items-center gap-2 rounded-full border border-[#F5ECE5] dark:border-slate-700 bg-white/70 dark:bg-slate-800/40 px-3 py-1 text-xs text-[#6b5f57] dark:text-slate-300">
                   <span className="h-2 w-2 rounded-full bg-[#E89F88] dark:bg-blue-400 animate-pulse" aria-hidden />
-                  Monitoring {formatNumber(clusters.length, "0")} clusters
+                  {formatNumber(clusters.length, "0")} active clusters
                 </span>
               </div>
 
@@ -373,13 +368,13 @@ export const Dashboard: React.FC = () => {
                         key={`${cluster.cluster_id}-${cluster.label}`}
                         className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm hover:shadow-md transition"
                       >
-                        <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start justify-between gap-3 mb-3">
                           <div>
-                            <h3 className="text-lg font-semibold text-[#333333] dark:text-white">
-                              {cluster.label || `Cluster #${cluster.cluster_id}`}
+                            <h3 className="text-base font-semibold text-[#333333] dark:text-white">
+                              {cluster.label || `Topic ${cluster.cluster_id}`}
                             </h3>
                             <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
-                              {formatNumber(cluster.size, "0")} tickets · Updated {formatTimestamp(cluster.last_updated)}
+                              {formatNumber(cluster.size, "0")} tickets
                             </p>
                           </div>
                           <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium ${visuals.badge}`}>
@@ -388,8 +383,8 @@ export const Dashboard: React.FC = () => {
                           </span>
                         </div>
                         {cluster.top_entities.length > 0 && (
-                          <div className="mt-4 flex flex-wrap gap-2">
-                            {cluster.top_entities.slice(0, 6).map((entity) => (
+                          <div className="flex flex-wrap gap-2">
+                            {cluster.top_entities.slice(0, 4).map((entity) => (
                               <span
                                 key={entity}
                                 className="rounded-full bg-[#F5ECE5]/60 dark:bg-slate-700/50 px-3 py-1 text-xs text-[#6b5f57] dark:text-slate-200"
@@ -399,72 +394,45 @@ export const Dashboard: React.FC = () => {
                             ))}
                           </div>
                         )}
-                        {cluster.ticket_ids.length > 0 && (
-                          <p className="mt-4 text-xs text-[#9c8f86] dark:text-slate-500">
-                            Sample tickets: {cluster.ticket_ids.slice(0, 3).join(", ")}
-                            {cluster.ticket_ids.length > 3 ? "…" : ""}
-                          </p>
-                        )}
                       </article>
                     );
                   })}
                 </div>
               ) : (
                 <div className="rounded-2xl border border-dashed border-[#F5ECE5] dark:border-slate-700 bg-white/60 dark:bg-slate-800/40 p-8 text-center text-sm text-[#6b5f57] dark:text-slate-400">
-                  No trend clusters available yet. Once GLPI resolutions are processed, emerging topics will appear here automatically.
+                  No trending topics yet. They will appear once we process more support tickets.
                 </div>
               )}
             </section>
 
             <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
               <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
-                <h3 className="text-lg font-semibold text-[#333333] dark:text-white">Assistive throughput</h3>
-                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
-                  Balance between autonomous resolutions and escalations over the last 30 days.
-                </p>
-                <dl className="mt-4 space-y-3">
+                <h3 className="text-base font-semibold text-[#333333] dark:text-white mb-3">Performance (30 Days)</h3>
+                <dl className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Assistive handled</dt>
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">AI Resolved</dt>
                     <dd className="text-base font-semibold text-[#333333] dark:text-white">
                       {formatNumber(assists, "0")}
                     </dd>
                   </div>
                   <div className="flex items-center justify-between">
-                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Escalated to human</dt>
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Agent Handled</dt>
                     <dd className="text-base font-semibold text-[#333333] dark:text-white">
                       {formatNumber(escalations, "0")}
                     </dd>
                   </div>
-                </dl>
-              </article>
-
-              <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
-                <h3 className="text-lg font-semibold text-[#333333] dark:text-white">Resolution confidence</h3>
-                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
-                  Confidence indicators derived from `/metrics` assistive rate.
-                </p>
-                <dl className="mt-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Assistive success</dt>
-                    <dd className="text-base font-semibold text-[#333333] dark:text-white">
+                  <div className="flex items-center justify-between pt-3 border-t border-[#F5ECE5] dark:border-slate-700">
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Success Rate</dt>
+                    <dd className="text-base font-semibold text-emerald-600 dark:text-emerald-400">
                       {formatPercent(assistiveRate)}
                     </dd>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Escalation rate</dt>
-                    <dd className="text-base font-semibold text-[#333333] dark:text-white">
-                      {formatPercent(escalationRate)}
-                    </dd>
-                  </div>
                 </dl>
               </article>
 
               <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
-                <h3 className="text-lg font-semibold text-[#333333] dark:text-white">Knowledge signals</h3>
-                <p className="mt-1 text-sm text-[#6b5f57] dark:text-slate-400">
-                  Auto-generated content vs manual curation plus trending entities from the analytics clusters.
-                </p>
-                <div className="mt-4 flex flex-wrap gap-2">
+                <h3 className="text-base font-semibold text-[#333333] dark:text-white mb-3">Top Keywords</h3>
+                <div className="flex flex-wrap gap-2">
                   {knowledgeTags.length ? (
                     knowledgeTags.map((tag) => (
                       <span
@@ -476,10 +444,36 @@ export const Dashboard: React.FC = () => {
                     ))
                   ) : (
                     <span className="text-sm text-[#9c8f86] dark:text-slate-400">
-                      No entities highlighted yet—once GLPI resolutions land, emerging topics will display here.
+                      Keywords will appear here as tickets are processed
                     </span>
                   )}
                 </div>
+              </article>
+
+              <article className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700 bg-white/85 dark:bg-slate-800/50 p-5 shadow-sm">
+                <h3 className="text-base font-semibold text-[#333333] dark:text-white mb-3">Quick Stats</h3>
+                <dl className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Avg CSAT Score</dt>
+                    <dd className="text-base font-semibold text-[#333333] dark:text-white">
+                      {formatCsat(metrics?.avg_csat)}
+                    </dd>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Avg Resolution</dt>
+                    <dd className="text-base font-semibold text-[#333333] dark:text-white">
+                      {formatHours(metrics?.avg_resolution_hours)}
+                    </dd>
+                  </div>
+                  <div className="flex items-center justify-between pt-3 border-t border-[#F5ECE5] dark:border-slate-700">
+                    <dt className="text-sm text-[#9c8f86] dark:text-slate-400">Knowledge Growth</dt>
+                    <dd className="text-base font-semibold text-purple-600 dark:text-purple-400">
+                      {metrics?.knowledge_growth_ratio !== undefined && metrics?.knowledge_growth_ratio !== null
+                        ? `${metrics.knowledge_growth_ratio.toFixed(1)}×`
+                        : "—"}
+                    </dd>
+                  </div>
+                </dl>
               </article>
             </section>
           </div>
