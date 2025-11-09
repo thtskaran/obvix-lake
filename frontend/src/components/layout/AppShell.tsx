@@ -13,7 +13,7 @@ import {
   ChevronRight,
   Sun,
   Moon,
-  FileQuestion, // Add this import for FAQ Manager icon
+  ClipboardCheck,
 } from 'lucide-react';
 import { classNames } from '../../utils';
 import { ThemeContext } from '../../app/providers/AppProviders';
@@ -21,9 +21,9 @@ import { ThemeContext } from '../../app/providers/AppProviders';
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Knowledge Base', href: '/knowledge', icon: Database },
+  { name: 'Review Queue', href: '/knowledge-review', icon: ClipboardCheck },
   { name: 'Tickets', href: '/tickets', icon: MessageSquare },
   { name: 'Assistant Chat', href: '/ai-learning', icon: Bot },
-  { name: 'FAQ Manager', href: '/faq-manager', icon: FileQuestion }, // Add FAQ Manager
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];
