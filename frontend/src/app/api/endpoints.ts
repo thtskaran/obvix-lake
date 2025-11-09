@@ -467,6 +467,45 @@ export async function fetchHealthStatus(signal?: AbortSignal): Promise<HealthRes
   return data ?? {};
 }
 
+export interface SystemSettings {
+  chat_model: string;
+  embedding_model: string;
+  rag_judge_model: string;
+  llm_temp_low: number;
+  max_embed_chars: number;
+  min_assist_turns: number;
+  max_assist_turns: number;
+  max_history_messages: number;
+  rag_top_k: number;
+  rag_max_candidates: number;
+  rag_bm25_weight: number;
+  rag_semantic_weight: number;
+  knowledge_auto_approve: boolean;
+  knowledge_pipeline_interval_seconds: number;
+  analytics_refresh_interval_seconds: number;
+  metrics_refresh_interval_seconds: number;
+  glpi_sync_interval_seconds: number;
+  updated_at?: string;
+}
+
+export async function fetchSettings(signal?: AbortSignal): Promise<SystemSettings> {
+  const { data } = await apiClient.get<SystemSettings>("/settings", { signal });
+  return data;
+}
+
+export async function updateSettings(
+  settings: Partial<SystemSettings>,
+  signal?: AbortSignal
+): Promise<SystemSettings> {
+  const { data } = await apiClient.put<SystemSettings>("/settings", settings, { signal });
+  return data;
+}
+
+export async function resetSettings(signal?: AbortSignal): Promise<SystemSettings> {
+  const { data } = await apiClient.post<SystemSettings>("/settings/reset", {}, { signal });
+  return data;
+}
+
 export async function sendChatMessage(
   payload: ChatRequest,
   signal?: AbortSignal,

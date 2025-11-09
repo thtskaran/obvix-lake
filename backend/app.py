@@ -2568,6 +2568,106 @@ def healthcheck():
     return jsonify(statuses)
 
 
+# ==============================================================================
+# SETTINGS API - Admin configurable settings stored in MongoDB
+# ==============================================================================
+SETTINGS_COL = os.environ.get("SETTINGS_COL", "system_settings")
+
+def _get_default_settings():
+    """Return default settings with current env/hardcoded values"""
+    return {
+        "chat_model": CHAT_MODEL,
+        "embedding_model": EMBEDDING_MODEL,
+        "rag_judge_model": RAG_JUDGE_MODEL,
+        "llm_temp_low": LLM_TEMP_LOW,
+        "max_embed_chars": MAX_EMBED_CHARS,
+        "min_assist_turns": MIN_ASSIST_TURNS,
+        "max_assist_turns": MAX_ASSIST_TURNS,
+        "max_history_messages": MAX_HISTORY_MESSAGES_TO_RETRIEVE,
+        "rag_top_k": RAG_TOP_K,
+        "rag_max_candidates": RAG_MAX_CANDIDATES,
+        "rag_bm25_weight": RAG_BM25_WEIGHT,
+        "rag_semantic_weight": RAG_SEMANTIC_WEIGHT,
+        "knowledge_auto_approve": KNOWLEDGE_AUTO_APPROVE,
+        "knowledge_pipeline_interval_seconds": KNOWLEDGE_PIPELINE_INTERVAL_SECONDS,
+        "analytics_refresh_interval_seconds": ANALYTICS_REFRESH_INTERVAL_SECONDS,
+        "metrics_refresh_interval_seconds": METRICS_REFRESH_INTERVAL_SECONDS,
+        "glpi_sync_interval_seconds": GLPI_SYNC_INTERVAL_SECONDS,
+    }
+
+def _get_settings():
+    """Get settings from MongoDB, falling back to defaults"""
+    settings_doc = db[SETTINGS_COL].find_one({"_id": "global"})
+    if settings_doc:
+        settings_doc.pop("_id", None)
+        return settings_doc
+    return _get_default_settings()
+
+@app.route('/settings', methods=['GET'])
+def get_settings():
+    """Get current system settings"""
+    settings = _get_settings()
+    return jsonify(settings)
+
+@app.route('/settings', methods=['PUT'])
+def update_settings():
+    """Update system settings"""
+    payload = request.get_json() or {}
+    
+    # Validate and sanitize input
+    valid_keys = set(_get_default_settings().keys())
+    updates = {}
+    
+    for key, value in payload.items():
+        if key not in valid_keys:
+            continue
+            
+        # Type validation
+        if key in ["chat_model", "embedding_model", "rag_judge_model"]:
+            updates[key] = str(value)
+        elif key in ["llm_temp_low", "rag_bm25_weight", "rag_semantic_weight"]:
+            try:
+                updates[key] = float(value)
+            except (ValueError, TypeError):
+                return jsonify({"error": f"Invalid float value for {key}"}), 400
+        elif key in ["max_embed_chars", "min_assist_turns", "max_assist_turns", 
+                     "max_history_messages", "rag_top_k", "rag_max_candidates",
+                     "knowledge_pipeline_interval_seconds", "analytics_refresh_interval_seconds",
+                     "metrics_refresh_interval_seconds", "glpi_sync_interval_seconds"]:
+            try:
+                updates[key] = int(value)
+            except (ValueError, TypeError):
+                return jsonify({"error": f"Invalid integer value for {key}"}), 400
+        elif key == "knowledge_auto_approve":
+            updates[key] = bool(value)
+    
+    if not updates:
+        return jsonify({"error": "No valid settings to update"}), 400
+    
+    # Update MongoDB
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    db[SETTINGS_COL].update_one(
+        {"_id": "global"},
+        {"$set": updates},
+        upsert=True
+    )
+    
+    # Return updated settings
+    return jsonify(_get_settings())
+
+@app.route('/settings/reset', methods=['POST'])
+def reset_settings():
+    """Reset settings to defaults"""
+    defaults = _get_default_settings()
+    defaults["updated_at"] = datetime.now(timezone.utc).isoformat()
+    db[SETTINGS_COL].replace_one(
+        {"_id": "global"},
+        {"_id": "global", **defaults},
+        upsert=True
+    )
+    return jsonify(defaults)
+
+
 @app.route('/knowledge/articles', methods=['GET'])
 def list_knowledge_articles():
     persona = _normalize_persona_name(request.args.get('persona'))
