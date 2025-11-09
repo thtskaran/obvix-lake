@@ -3116,10 +3116,12 @@ def ticket_router_endpoint():
 @app.route('/tickets', methods=['GET'])
 def list_tickets_endpoint():
     limit_param = request.args.get('limit', '50')
+    offset_param = request.args.get('offset', '0')
     try:
         limit = max(1, min(int(limit_param), 200))
+        offset = max(0, int(offset_param))
     except ValueError:
-        return jsonify({"error": "limit must be a valid integer"}), 400
+        return jsonify({"error": "limit and offset must be valid integers"}), 400
 
     persona = request.args.get('persona')
     status_filter = request.args.get('status')
@@ -3161,11 +3163,18 @@ def list_tickets_endpoint():
         db[SUPPORT_ESCALATIONS_COL]
         .find(query)
         .sort("created_at", DESCENDING)
+        .skip(offset)
         .limit(limit)
     )
     tickets = [_serialize_ticket_document(doc) for doc in cursor]
     total = db[SUPPORT_ESCALATIONS_COL].count_documents(query)
-    return jsonify({"tickets": tickets, "count": len(tickets), "total": total})
+    return jsonify({
+        "tickets": tickets, 
+        "count": len(tickets), 
+        "total": total,
+        "offset": offset,
+        "limit": limit
+    })
 
 
 @app.route('/tickets/metadata', methods=['GET'])

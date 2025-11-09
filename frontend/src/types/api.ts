@@ -369,7 +369,7 @@ export interface SupportTicket {
   created_at?: string;
   updated_at?: string;
   closed_at?: string;
-  router_classification?: unknown;
+  router_classification?: TicketClassification;
   router_payload?: unknown;
   transcript?: string;
   rag_metrics?: Record<string, unknown> | null;
@@ -382,10 +382,22 @@ export interface SupportTicket {
   glpi_details?: Record<string, unknown> | null;
 }
 
+export interface TicketListParams {
+  persona?: string;
+  status?: "open" | "closed";
+  userId?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export interface TicketListResponse {
   tickets: SupportTicket[];
   count: number;
   total: number;
+  offset?: number;
+  limit?: number;
+  has_more?: boolean;
 }
 
 export interface TicketSummaryStats {

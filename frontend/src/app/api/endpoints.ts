@@ -22,6 +22,7 @@ import type {
   CreateKnowledgeArticleRequest,
   UpdateKnowledgeArticleRequest,
   TicketListResponse,
+  TicketListParams,
   TicketMetadataResponse,
   TrendCluster,
 } from "../../types/api";
@@ -405,14 +406,6 @@ export async function fetchKnowledgeDocumentChunks(
   };
 }
 
-export interface TicketListParams {
-  persona?: string;
-  status?: "open" | "closed";
-  userId?: string;
-  search?: string;
-  limit?: number;
-}
-
 function buildTicketQuery(params: TicketListParams): string {
   const searchParams = new URLSearchParams();
   if (params.persona?.trim()) {
@@ -430,6 +423,9 @@ function buildTicketQuery(params: TicketListParams): string {
   if (typeof params.limit === "number" && Number.isFinite(params.limit)) {
     searchParams.set("limit", String(Math.max(1, Math.min(params.limit, 200))));
   }
+  if (typeof params.offset === "number" && Number.isFinite(params.offset)) {
+    searchParams.set("offset", String(Math.max(0, params.offset)));
+  }
   const query = searchParams.toString();
   return query ? `?${query}` : "";
 }
@@ -444,6 +440,9 @@ export async function fetchTickets(
     tickets: Array.isArray(data?.tickets) ? data.tickets : [],
     count: typeof data?.count === "number" ? data.count : 0,
     total: typeof data?.total === "number" ? data.total : 0,
+    offset: typeof data?.offset === "number" ? data.offset : params.offset ?? 0,
+    limit: typeof data?.limit === "number" ? data.limit : params.limit ?? 50,
+    has_more: data?.total ? (data.offset ?? 0) + (data.count ?? 0) < data.total : false,
   };
 }
 
