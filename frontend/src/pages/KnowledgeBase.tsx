@@ -3,8 +3,11 @@ import {
   approveKnowledgeQueueItem,
   fetchKnowledgeQueue,
 } from "../app/api/endpoints";
+import KnowledgeArticleCreateForm from "../components/knowledge/KnowledgeArticleCreateForm";
+import KnowledgeArticlesPanel from "../components/knowledge/KnowledgeArticlesPanel";
+import KnowledgeChunkExplorer from "../components/knowledge/KnowledgeChunkExplorer";
 import { usePersonas } from "../hooks/usePersonas";
-import type { KnowledgeQueueItem } from "../types/api";
+import type { KnowledgeArticle, KnowledgeQueueItem } from "../types/api";
 
 const STATUS_LABELS: Record<string, string> = {
   awaiting_approval: "Awaiting approval",
@@ -89,6 +92,14 @@ export const KnowledgeBase = () => {
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const { personas } = usePersonas();
+  const [articlesRefreshToken, setArticlesRefreshToken] = useState<number>(0);
+
+  const defaultKnowledgePersona = useMemo(() => {
+    if (selectedPersona !== "all" && selectedPersona) {
+      return selectedPersona;
+    }
+    return personas[0];
+  }, [personas, selectedPersona]);
 
   const loadQueue = useCallback(
     async (signal?: AbortSignal) => {
@@ -130,6 +141,14 @@ export const KnowledgeBase = () => {
     await loadQueue();
   }, [loadQueue]);
 
+  const handleArticleCreated = useCallback(
+    (_article: KnowledgeArticle) => {
+      setArticlesRefreshToken((prev) => prev + 1);
+      void refresh();
+    },
+    [refresh],
+  );
+
   const handleApprove = async (itemId: string) => {
     setApprovingId(itemId);
     setError(null);
@@ -150,6 +169,10 @@ export const KnowledgeBase = () => {
     }
     return items.filter((item) => item.persona === selectedPersona);
   }, [items, selectedPersona]);
+
+  const hasPersonas = personas.length > 0;
+  const knowledgePanelKey = defaultKnowledgePersona ? `panel-${defaultKnowledgePersona}` : "panel-all";
+  const chunkExplorerKey = defaultKnowledgePersona ? `chunks-${defaultKnowledgePersona}` : "chunks-all";
 
   return (
     <div className="min-h-screen bg-[#FDFBFA] dark:bg-gradient-to-br dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
@@ -349,6 +372,34 @@ export const KnowledgeBase = () => {
             })
           )}
         </section>
+
+        {hasPersonas && (
+          <section className="grid gap-6 xl:grid-cols-3">
+            <div className="xl:col-span-2">
+              <KnowledgeArticlesPanel
+                key={knowledgePanelKey}
+                personas={personas}
+                defaultPersona={defaultKnowledgePersona}
+                refreshToken={articlesRefreshToken}
+              />
+            </div>
+            <div className="xl:col-span-1">
+              <KnowledgeArticleCreateForm
+                personas={personas}
+                defaultPersona={defaultKnowledgePersona}
+                onCreated={handleArticleCreated}
+              />
+            </div>
+          </section>
+        )}
+
+        {hasPersonas && (
+          <KnowledgeChunkExplorer
+            key={chunkExplorerKey}
+            personas={personas}
+            defaultPersona={defaultKnowledgePersona}
+          />
+        )}
       </div>
     </div>
   );
