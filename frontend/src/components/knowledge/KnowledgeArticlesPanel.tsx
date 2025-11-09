@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronRight, ChevronDown, Search, RefreshCw, FileText, Edit2, Save, X } from "lucide-react";
 import { fetchKnowledgeArticles, updateKnowledgeArticle } from "../../app/api/endpoints";
+import Pagination from "../common/Pagination";
 import type {
   KnowledgeArticle,
   KnowledgeArticleFaqEntry,
@@ -398,24 +399,30 @@ export const KnowledgeArticlesPanel = ({
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [expandedArticleIds, setExpandedArticleIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [itemsPerPage] = useState<number>(10);
+  const [totalArticles, setTotalArticles] = useState<number>(0);
 
   const effectivePersona = useMemo(() => defaultPersona ?? personas[0] ?? "", [defaultPersona, personas]);
 
   const loadArticles = useCallback(
-    async (signal?: AbortSignal) => {
+    async (page: number, signal?: AbortSignal) => {
       if (!effectivePersona) {
         setArticles([]);
+        setTotalArticles(0);
         return;
       }
       setIsLoading(true);
       setError(null);
       try {
+        const offset = (page - 1) * itemsPerPage;
         const response = await fetchKnowledgeArticles(
           {
             persona: effectivePersona,
-            limit: 100,
-            offset: 0,
+            limit: itemsPerPage,
+            offset: offset,
             includeFullText: true,
+            search: searchQuery.trim() || undefined,
           },
           signal
         );
@@ -423,6 +430,7 @@ export const KnowledgeArticlesPanel = ({
           return;
         }
         setArticles(response.articles ?? []);
+        setTotalArticles(response.total ?? 0);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
@@ -435,14 +443,21 @@ export const KnowledgeArticlesPanel = ({
         }
       }
     },
-    [effectivePersona]
+    [effectivePersona, itemsPerPage, searchQuery]
   );
 
   useEffect(() => {
     const controller = new AbortController();
-    loadArticles(controller.signal);
+    setCurrentPage(1); // Reset to first page when dependencies change
+    loadArticles(1, controller.signal);
     return () => controller.abort();
   }, [loadArticles, refreshToken]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    loadArticles(currentPage, controller.signal);
+    return () => controller.abort();
+  }, [currentPage, loadArticles]);
 
   const toggleArticleExpansion = (articleId: string) => {
     setExpandedArticleIds((prev) => {
@@ -493,7 +508,7 @@ export const KnowledgeArticlesPanel = ({
       setSuccessMessage("Article updated successfully.");
       setEditingId(null);
       setEditForm(null);
-      await loadArticles();
+      await loadArticles(currentPage);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to update article.";
       setError(message);
@@ -502,17 +517,18 @@ export const KnowledgeArticlesPanel = ({
     }
   };
 
-  // Filter articles based on search
-  const filteredArticles = useMemo(() => {
-    if (!searchQuery.trim()) return articles;
-    const query = searchQuery.toLowerCase();
-    return articles.filter(
-      (article) =>
-        article.title?.toLowerCase().includes(query) ||
-        article.summary?.toLowerCase().includes(query) ||
-        article.tags?.some((tag) => tag.toLowerCase().includes(query))
-    );
-  }, [articles, searchQuery]);
+  const totalPages = Math.ceil(totalArticles / itemsPerPage);
+
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+    setExpandedArticleIds(new Set()); // Collapse all when changing pages
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
+    setCurrentPage(1); // Reset to first page on new search
+  };
 
   return (
     <section className="space-y-4">
@@ -536,12 +552,12 @@ export const KnowledgeArticlesPanel = ({
               type="text"
               placeholder="Search articles..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => handleSearch(e.target.value)}
               className="w-64 rounded-lg border border-[#F5ECE5] dark:border-slate-700/60 bg-white dark:bg-slate-800/60 pl-10 pr-3 py-2 text-sm text-[#333333] dark:text-white placeholder:text-[#6b5f57] dark:placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#E89F88]/30 dark:focus:ring-blue-500/40"
             />
           </div>
           <button
-            onClick={() => loadArticles()}
+            onClick={() => loadArticles(currentPage)}
             className="p-2 rounded-lg border border-[#F5ECE5] dark:border-slate-700/60 text-[#6b5f57] dark:text-slate-400 hover:bg-[#F5ECE5]/60 dark:hover:bg-slate-700/40 transition-colors"
             title="Refresh"
           >
@@ -553,13 +569,11 @@ export const KnowledgeArticlesPanel = ({
       {/* Stats */}
       <div className="flex gap-3 text-sm text-[#6b5f57] dark:text-slate-400">
         <span>
-          Total: <span className="font-semibold text-[#333333] dark:text-white">{articles.length}</span>
+          Total: <span className="font-semibold text-[#333333] dark:text-white">{totalArticles}</span>
         </span>
-        {searchQuery && (
-          <span>
-            Filtered: <span className="font-semibold text-[#333333] dark:text-white">{filteredArticles.length}</span>
-          </span>
-        )}
+        <span>
+          Page: <span className="font-semibold text-[#333333] dark:text-white">{currentPage} of {totalPages || 1}</span>
+        </span>
       </div>
 
       {/* Messages */}
@@ -588,28 +602,38 @@ export const KnowledgeArticlesPanel = ({
               </div>
             ))}
           </div>
-        ) : filteredArticles.length === 0 ? (
+        ) : articles.length === 0 ? (
           <div className="rounded-lg border border-[#F5ECE5] dark:border-slate-700/60 bg-white dark:bg-slate-800/60 p-8 text-center">
             <p className="text-sm text-[#6b5f57] dark:text-slate-400">
               {searchQuery ? "No articles match your search." : "No articles available for this persona yet."}
             </p>
           </div>
         ) : (
-          filteredArticles.map((article) => (
-            <ArticleLogEntry
-              key={article.id}
-              article={article}
-              isExpanded={expandedArticleIds.has(article.id)}
-              onToggle={() => toggleArticleExpansion(article.id)}
-              onEdit={handleStartEdit}
-              isEditing={editingId === article.id}
-              editForm={editForm}
-              onEditChange={handleEditChange}
-              onSave={handleSave}
-              onCancelEdit={handleCancelEdit}
-              isSaving={savingId === article.id}
+          <>
+            {articles.map((article) => (
+              <ArticleLogEntry
+                key={article.id}
+                article={article}
+                isExpanded={expandedArticleIds.has(article.id)}
+                onToggle={() => toggleArticleExpansion(article.id)}
+                onEdit={handleStartEdit}
+                isEditing={editingId === article.id}
+                editForm={editForm}
+                onEditChange={handleEditChange}
+                onSave={handleSave}
+                onCancelEdit={handleCancelEdit}
+                isSaving={savingId === article.id}
+              />
+            ))}
+            <Pagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalItems={totalArticles}
+              itemsPerPage={itemsPerPage}
+              onPageChange={handlePageChange}
+              isLoading={isLoading}
             />
-          ))
+          </>
         )}
       </div>
     </section>

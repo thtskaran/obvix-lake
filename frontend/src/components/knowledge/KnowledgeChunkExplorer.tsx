@@ -4,6 +4,7 @@ import {
   fetchKnowledgeDocumentChunks,
   KnowledgeDocumentChunksParams,
 } from "../../app/api/endpoints";
+import Pagination from "../common/Pagination";
 import type { KnowledgeCatalogGDriveDocument, KnowledgeDocumentChunk } from "../../types/api";
 
 interface KnowledgeChunkExplorerProps {
@@ -13,7 +14,7 @@ interface KnowledgeChunkExplorerProps {
   onError?: (message: string) => void;
 }
 
-const MAX_CHUNK_LIMIT = 500;
+const ITEMS_PER_PAGE = 20;
 
 export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId, onError }: KnowledgeChunkExplorerProps) => {
   const [selectedPersona, setSelectedPersona] = useState<string>(defaultPersona ?? personas[0] ?? "");
@@ -26,6 +27,7 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
   const [total, setTotal] = useState<number>(0);
   const [includeEmbedding, setIncludeEmbedding] = useState<boolean>(false);
   const [initialFileSelectionApplied, setInitialFileSelectionApplied] = useState<boolean>(!defaultFileId);
+  const [currentPage, setCurrentPage] = useState<number>(1);
 
   useEffect(() => {
     if (!personas.length) {
@@ -106,7 +108,7 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
   }, [loadCatalog, selectedPersona]);
 
   const loadChunks = useCallback(
-    async (fileId: string, signal?: AbortSignal) => {
+    async (fileId: string, page: number, signal?: AbortSignal) => {
       if (!selectedPersona || !fileId) {
         setChunks([]);
         setTotal(0);
@@ -115,10 +117,11 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
       setIsLoading(true);
       setError(null);
       try {
+        const offset = (page - 1) * ITEMS_PER_PAGE;
         const params: KnowledgeDocumentChunksParams = {
           persona: selectedPersona,
-          limit: MAX_CHUNK_LIMIT,
-          offset: 0,
+          limit: ITEMS_PER_PAGE,
+          offset: offset,
           includeEmbedding,
         };
         const response = await fetchKnowledgeDocumentChunks(fileId, params, signal);
@@ -146,7 +149,8 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
   useEffect(() => {
     const controller = new AbortController();
     if (selectedPersona && selectedFileId) {
-      loadChunks(selectedFileId, controller.signal);
+      setCurrentPage(1); // Reset to first page when file changes
+      loadChunks(selectedFileId, 1, controller.signal);
     } else {
       setChunks([]);
       setTotal(0);
@@ -154,10 +158,38 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
     return () => controller.abort();
   }, [loadChunks, selectedFileId, selectedPersona]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    if (selectedPersona && selectedFileId && currentPage > 1) {
+      loadChunks(selectedFileId, currentPage, controller.signal);
+    }
+    return () => controller.abort();
+  }, [currentPage, loadChunks, selectedFileId, selectedPersona]);
+
   const selectedDocument = useMemo(
     () => documents.find((doc) => doc.file_id === selectedFileId),
     [documents, selectedFileId],
   );
+
+  const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleFileChange = (fileId: string) => {
+    setSelectedFileId(fileId);
+    setCurrentPage(1);
+  };
+
+  const handlePersonaChange = (persona: string) => {
+    setSelectedPersona(persona);
+    setSelectedFileId("");
+    setChunks([]);
+    setTotal(0);
+    setCurrentPage(1);
+  };
 
   return (
     <section className="space-y-4 rounded-2xl border border-[#F5ECE5] bg-white/80 p-6 shadow-sm dark:border-slate-700/60 dark:bg-slate-800/60">
@@ -173,12 +205,7 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
           Persona
           <select
             value={selectedPersona}
-            onChange={(event) => {
-              setSelectedPersona(event.target.value);
-              setSelectedFileId("");
-              setChunks([]);
-              setTotal(0);
-            }}
+            onChange={(event) => handlePersonaChange(event.target.value)}
             className="rounded-xl border border-[#F5ECE5] bg-white px-3 py-2 text-sm text-[#333333] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-white"
           >
             {personas.map((persona) => (
@@ -193,7 +220,7 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
           Knowledge document
           <select
             value={selectedFileId}
-            onChange={(event) => setSelectedFileId(event.target.value)}
+            onChange={(event) => handleFileChange(event.target.value)}
             disabled={!documents.length || isCatalogLoading}
             className="rounded-xl border border-[#F5ECE5] bg-white px-3 py-2 text-sm text-[#333333] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-600/50 dark:bg-slate-900/40 dark:text-white disabled:dark:bg-slate-800/40"
           >
@@ -257,8 +284,7 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-semibold text-[#6b5f57] dark:text-slate-300">
             <span>
-              Loaded {chunks.length} chunk{chunks.length === 1 ? "" : "s"}
-              {total > chunks.length && ` (showing first ${chunks.length} of ${total})`}
+              Showing {chunks.length} of {total} chunk{total === 1 ? "" : "s"}
             </span>
             <span>Embedding {includeEmbedding ? "enabled" : "disabled"}</span>
           </div>
@@ -299,6 +325,14 @@ export const KnowledgeChunkExplorer = ({ personas, defaultPersona, defaultFileId
               </article>
             ))}
           </div>
+          <Pagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalItems={total}
+            itemsPerPage={ITEMS_PER_PAGE}
+            onPageChange={handlePageChange}
+            isLoading={isLoading}
+          />
         </div>
       )}
     </section>
