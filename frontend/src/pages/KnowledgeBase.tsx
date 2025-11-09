@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   approveKnowledgeQueueItem,
   fetchKnowledgeQueue,
+  rejectKnowledgeQueueItem,
 } from "../app/api/endpoints";
 import KnowledgeArticleCreateForm from "../components/knowledge/KnowledgeArticleCreateForm";
 import KnowledgeArticlesPanel from "../components/knowledge/KnowledgeArticlesPanel";
@@ -90,6 +91,7 @@ export const KnowledgeBase = () => {
   const [selectedPersona, setSelectedPersona] = useState<string>("all");
   const [autoApproveEnabled, setAutoApproveEnabled] = useState<boolean>(false);
   const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const { personas } = usePersonas();
   const [articlesRefreshToken, setArticlesRefreshToken] = useState<number>(0);
@@ -160,6 +162,26 @@ export const KnowledgeBase = () => {
       setError(message);
     } finally {
       setApprovingId(null);
+    }
+  };
+
+  const handleReject = async (item: KnowledgeQueueItem) => {
+    const confirmation = window.confirm("Reject this draft from the knowledge queue?");
+    if (!confirmation) {
+      return;
+    }
+    const reasonInput = window.prompt("Optional: add a note for the rejection", "");
+    const reason = reasonInput?.trim();
+    setRejectingId(item.id);
+    setError(null);
+    try {
+      await rejectKnowledgeQueueItem(item.id, reason ? { reason } : undefined);
+      await refresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Reject failed.";
+      setError(message);
+    } finally {
+      setRejectingId(null);
     }
   };
 
@@ -285,6 +307,7 @@ export const KnowledgeBase = () => {
               const steps = extractSteps(item);
               const canApprove = ["awaiting_approval", "requeued"].includes(item.status ?? "");
               const approving = approvingId === item.id;
+              const rejecting = rejectingId === item.id;
               return (
                 <article
                   key={item.id}
@@ -342,7 +365,7 @@ export const KnowledgeBase = () => {
                       <button
                         type="button"
                         onClick={() => handleApprove(item.id)}
-                        disabled={!canApprove || approving}
+                        disabled={!canApprove || approving || rejecting}
                         className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-[#E89F88] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#D68B72] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 disabled:cursor-not-allowed disabled:bg-[#E89F88]/40"
                       >
                         {approving ? (
@@ -353,6 +376,21 @@ export const KnowledgeBase = () => {
                           </svg>
                         )}
                         Approve & publish
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleReject(item)}
+                        disabled={!canApprove || rejecting || approving}
+                        className="inline-flex items-center justify-center gap-2 rounded-xl border border-[#F5ECE5] px-4 py-3 text-sm font-semibold text-[#E57252] transition-colors hover:border-[#E89F88] hover:text-[#D36847] focus:outline-none focus:ring-2 focus:ring-[#E89F88]/40 disabled:cursor-not-allowed disabled:border-[#F5ECE5] disabled:text-[#E89F88]/50 dark:border-slate-600/60 dark:text-blue-200 dark:hover:border-blue-400 dark:hover:text-blue-100"
+                      >
+                        {rejecting ? (
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-current/50 border-t-current" />
+                        ) : (
+                          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        )}
+                        Reject
                       </button>
                       <details className="group flex-[2] rounded-xl border border-[#F5ECE5] bg-white/80 px-4 py-3 text-sm text-[#6b5f57] transition-colors dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-300">
                         <summary className="flex cursor-pointer items-center justify-between text-sm font-semibold text-[#333333] dark:text-white">

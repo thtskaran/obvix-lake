@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  fetchTicketMetadata,
+  fetchTickets,
   routeTicket,
   submitFeedback,
 } from "../app/api/endpoints";
@@ -9,6 +11,8 @@ import type {
   TicketRouteResponse,
   TicketClassification,
   TicketKnowledgeMatch,
+  TicketMetadataResponse,
+  SupportTicket,
 } from "../types/api";
 import { usePersonas } from "../hooks/usePersonas";
 
@@ -56,6 +60,17 @@ function isValidMetadata(metadata: unknown): metadata is Record<string, unknown>
   return !!metadata && typeof metadata === "object" && !Array.isArray(metadata);
 }
 
+function formatJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    if (typeof value === "string") {
+      return value;
+    }
+    return String(value);
+  }
+}
+
 export const Tickets: React.FC = () => {
   const [persona, setPersona] = useState<string>(DEFAULT_PERSONA);
   const [description, setDescription] = useState<string>("");
@@ -68,6 +83,10 @@ export const Tickets: React.FC = () => {
   const [feedbackStates, setFeedbackStates] = useState<Record<string, FeedbackState>>({});
   const { personas, isLoading: isLoadingPersonas, error: personasError, refresh: refreshPersonas } = usePersonas([DEFAULT_PERSONA]);
   const [isRefreshingPersonas, setIsRefreshingPersonas] = useState(false);
+  const [helpdeskTickets, setHelpdeskTickets] = useState<SupportTicket[]>([]);
+  const [ticketMetadata, setTicketMetadata] = useState<TicketMetadataResponse | null>(null);
+  const [isLoadingHelpdesk, setIsLoadingHelpdesk] = useState<boolean>(false);
+  const [helpdeskError, setHelpdeskError] = useState<string | null>(null);
 
   useEffect(() => () => {
     activeController?.abort();
@@ -112,6 +131,47 @@ export const Tickets: React.FC = () => {
     }
     return tickets.find((ticket) => ticket.id === selectedTicketId) ?? null;
   }, [tickets, selectedTicketId]);
+
+  const loadHelpdeskData = useCallback(async (signal?: AbortSignal) => {
+    setHelpdeskError(null);
+    setIsLoadingHelpdesk(true);
+    try {
+      const [listResponse, metadataResponse] = await Promise.all([
+        fetchTickets({ limit: 20 }, signal),
+        fetchTicketMetadata(10, signal),
+      ]);
+      if (signal?.aborted) {
+        return;
+      }
+      setHelpdeskTickets(listResponse.tickets ?? []);
+      setTicketMetadata(metadataResponse);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Failed to load helpdesk tickets.";
+      setHelpdeskError(message);
+    } finally {
+      if (!signal?.aborted) {
+        setIsLoadingHelpdesk(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    loadHelpdeskData(controller.signal);
+    return () => controller.abort();
+  }, [loadHelpdeskData]);
+
+  const handleHelpdeskRefresh = async () => {
+    const controller = new AbortController();
+    try {
+      await loadHelpdeskData(controller.signal);
+    } finally {
+      controller.abort();
+    }
+  };
 
   const handleRouteSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -435,6 +495,145 @@ export const Tickets: React.FC = () => {
 
         <section className="grid grid-cols-1 gap-6 lg:grid-cols-[320px,minmax(0,1fr)]">
           <aside className="space-y-4">
+            <div className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700/60 bg-white/80 dark:bg-slate-800/60 backdrop-blur p-6">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <h2 className="text-lg font-semibold text-[#333333] dark:text-white">Helpdesk Snapshot</h2>
+                <button
+                  type="button"
+                  onClick={handleHelpdeskRefresh}
+                  className="inline-flex items-center gap-2 rounded-lg border border-[#F5ECE5] bg-white/70 px-3 py-2 text-xs font-semibold text-[#6b5f57] transition-colors hover:bg-[#F5ECE5]/60 dark:border-slate-600/40 dark:bg-slate-800/50 dark:text-slate-200 dark:hover:bg-slate-700"
+                  disabled={isLoadingHelpdesk}
+                >
+                  {isLoadingHelpdesk ? (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#E89F88]/40 border-t-[#E89F88]" />
+                  ) : (
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v6h6M20 20v-6h-6" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19A9 9 0 0119 5" />
+                    </svg>
+                  )}
+                  <span className="hidden sm:inline">Refresh</span>
+                </button>
+              </div>
+              {helpdeskError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-700 dark:border-red-800/60 dark:bg-red-500/10 dark:text-red-200">
+                  {helpdeskError}
+                </div>
+              ) : ticketMetadata ? (
+                <div className="grid grid-cols-2 gap-3 text-sm text-[#6b5f57] dark:text-slate-300">
+                  <div className="rounded-xl border border-[#F5ECE5] bg-[#FDF3EF]/70 p-3 dark:border-slate-700/60 dark:bg-slate-900/40">
+                    <span className="text-xs uppercase tracking-wide text-[#E57252] dark:text-blue-300">Total</span>
+                    <p className="text-xl font-semibold text-[#333333] dark:text-white">{ticketMetadata.summary.total}</p>
+                  </div>
+                  <div className="rounded-xl border border-[#F5ECE5] bg-[#FDF3EF]/70 p-3 dark:border-slate-700/60 dark:bg-slate-900/40">
+                    <span className="text-xs uppercase tracking-wide text-[#E57252] dark:text-blue-300">Open</span>
+                    <p className="text-xl font-semibold text-[#333333] dark:text-white">{ticketMetadata.summary.open}</p>
+                  </div>
+                  <div className="rounded-xl border border-[#F5ECE5] bg-white/80 p-3 dark:border-slate-700/60 dark:bg-slate-900/40">
+                    <span className="text-xs uppercase tracking-wide text-[#6b5f57] dark:text-slate-400">Closed</span>
+                    <p className="text-xl font-semibold text-[#333333] dark:text-white">{ticketMetadata.summary.closed}</p>
+                  </div>
+                  <div className="rounded-xl border border-[#F5ECE5] bg-white/80 p-3 dark:border-slate-700/60 dark:bg-slate-900/40">
+                    <span className="text-xs uppercase tracking-wide text-[#6b5f57] dark:text-slate-400">Open Ratio</span>
+                    <p className="text-xl font-semibold text-[#333333] dark:text-white">{(ticketMetadata.summary.open_ratio * 100).toFixed(0)}%</p>
+                  </div>
+                  {ticketMetadata.by_persona.length > 0 && (
+                    <div className="col-span-2 mt-2 space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-[#6b5f57] dark:text-slate-400">Top Personas</p>
+                      <ul className="space-y-1">
+                        {ticketMetadata.by_persona.slice(0, 3).map((entry) => (
+                          <li key={entry.persona ?? "unknown"} className="flex items-center justify-between text-xs">
+                            <span className="font-medium text-[#333333] dark:text-white">{entry.persona ?? "unknown"}</span>
+                            <span className="text-[#6b5f57] dark:text-slate-300">{entry.total} total</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="h-4 w-24 rounded-md bg-[#F5ECE5] dark:bg-slate-700 animate-pulse" />
+                  <div className="h-24 rounded-xl bg-[#F5ECE5]/70 dark:bg-slate-700/60 animate-pulse" />
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700/60 bg-white/80 dark:bg-slate-800/60 backdrop-blur p-6 space-y-3">
+              <h2 className="text-lg font-semibold text-[#333333] dark:text-white">Helpdesk Tickets</h2>
+              {isLoadingHelpdesk ? (
+                <div className="flex items-center gap-2 text-sm text-[#6b5f57] dark:text-slate-400">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#E89F88]/40 border-t-[#E89F88]" />
+                  Loading tickets...
+                </div>
+              ) : helpdeskError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50/80 px-3 py-2 text-xs text-red-700 dark:border-red-800/60 dark:bg-red-500/10 dark:text-red-200">
+                  {helpdeskError}
+                </div>
+              ) : helpdeskTickets.length === 0 ? (
+                <p className="text-sm text-[#6b5f57] dark:text-slate-400">
+                  No tickets were returned from the helpdesk API yet.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {helpdeskTickets.map((ticket) => {
+                    const hasRouterClassification = ticket.router_classification !== undefined && ticket.router_classification !== null;
+                    const hasRagMetrics = ticket.rag_metrics !== undefined && ticket.rag_metrics !== null;
+                    return (
+                      <details key={ticket.id} className="group rounded-xl border border-[#F5ECE5] bg-white/70 px-4 py-3 text-sm text-[#333333] transition-colors dark:border-slate-700/50 dark:bg-slate-900/40 dark:text-slate-200">
+                      <summary className="flex cursor-pointer items-start justify-between gap-3">
+                        <div className="flex flex-col gap-1">
+                          <span className="text-sm font-semibold text-[#333333] dark:text-white">{ticket.ticket_id ?? ticket.id}</span>
+                          <span className="text-xs text-[#6b5f57] dark:text-slate-400">{ticket.persona ?? "unknown persona"}</span>
+                        </div>
+                        <div className="flex flex-col items-end gap-1 text-right">
+                          <span className={`inline-flex items-center rounded-full px-2 py-1 text-[11px] font-semibold ${
+                            ticket.status === "closed"
+                              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+                              : "bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-200"
+                          }`}>
+                            {ticket.status ?? "unknown"}
+                          </span>
+                          <span className="text-[11px] text-[#6b5f57] dark:text-slate-400">{ticket.created_at ? formatTimestamp(ticket.created_at) : "No timestamp"}</span>
+                        </div>
+                      </summary>
+                      <div className="mt-3 space-y-3 text-xs leading-relaxed text-[#6b5f57] dark:text-slate-300">
+                        {ticket.escalation_reason && (
+                          <div>
+                            <p className="font-semibold uppercase tracking-wide text-[10px] text-[#E57252] dark:text-blue-300">Escalation Reason</p>
+                            <p>{ticket.escalation_reason}</p>
+                          </div>
+                        )}
+                        {hasRouterClassification ? (
+                          <div>
+                            <p className="font-semibold uppercase tracking-wide text-[10px] text-[#E57252] dark:text-blue-300">Router Classification</p>
+                            <pre className="mt-1 whitespace-pre-wrap rounded-lg bg-[#FDF3EF]/70 p-2 text-[11px] text-[#6b5f57] dark:bg-slate-900/40 dark:text-slate-200">
+{formatJson(ticket.router_classification)}
+                            </pre>
+                          </div>
+                        ) : null}
+                        {hasRagMetrics ? (
+                          <div>
+                            <p className="font-semibold uppercase tracking-wide text-[10px] text-[#E57252] dark:text-blue-300">RAG Metrics</p>
+                            <pre className="mt-1 whitespace-pre-wrap rounded-lg bg-[#FDF3EF]/70 p-2 text-[11px] text-[#6b5f57] dark:bg-slate-900/40 dark:text-slate-200">
+{formatJson(ticket.rag_metrics)}
+                            </pre>
+                          </div>
+                        ) : null}
+                        <div>
+                          <p className="font-semibold uppercase tracking-wide text-[10px] text-[#E57252] dark:text-blue-300">Raw Ticket</p>
+                          <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg bg-[#F5ECE5]/60 p-2 text-[11px] text-[#6b5f57] dark:bg-slate-900/40 dark:text-slate-200">
+{JSON.stringify(ticket, null, 2)}
+                          </pre>
+                        </div>
+                      </div>
+                      </details>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             <div className="rounded-2xl border border-[#F5ECE5] dark:border-slate-700/60 bg-white/80 dark:bg-slate-800/60 backdrop-blur p-6">
               <h2 className="text-lg font-semibold text-[#333333] dark:text-white mb-3">Recent Tickets</h2>
               {tickets.length === 0 ? (
