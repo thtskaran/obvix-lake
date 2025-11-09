@@ -377,6 +377,33 @@ class KnowledgePipeline:
         )
         return {"status": status, "article_id": publish_result}
 
+    def reject_queue_item(
+        self,
+        queue_id,
+        reviewer: str = "manual",
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        doc = self.db[self.queue_collection].find_one({"_id": queue_id})
+        if not doc:
+            raise ValueError("Queue item not found")
+        if doc.get("status") not in {"awaiting_approval", "requeued", "drafting", "pending"}:
+            raise ValueError("Queue item cannot be rejected from its current status")
+        now = datetime.now(timezone.utc)
+        update_payload = {
+            "status": "rejected",
+            "updated_at": now,
+            "rejected_at": now,
+            "rejected_by": reviewer,
+        }
+        if reason:
+            update_payload["rejection_reason"] = reason
+        self.db[self.queue_collection].update_one({"_id": doc["_id"]}, {"$set": update_payload})
+        return {
+            "status": "rejected",
+            "queue_id": str(doc["_id"]),
+            "rejection_reason": reason,
+        }
+
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     def _draft_article(self, resolution: Dict[str, Any]) -> Optional[Dict[str, Any]]:

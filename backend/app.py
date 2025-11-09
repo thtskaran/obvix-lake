@@ -1983,6 +1983,576 @@ def _parse_object_id(value: str) -> Optional[ObjectId]:
     except Exception:
         return None
 
+
+def _serialize_ticket_document(doc: Dict[str, Any]) -> Dict[str, Any]:
+    if not doc:
+        return {}
+
+    def _serialize_updates(entries: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        if not entries:
+            return []
+        serialized: List[Dict[str, Any]] = []
+        for entry in entries:
+            serialized.append(
+                {
+                    "timestamp": _serialize_datetime(entry.get("timestamp")),
+                    "user_id": entry.get("user_id"),
+                    "sender": entry.get("sender"),
+                    "message": entry.get("message"),
+                }
+            )
+        return serialized
+
+    rag_metrics = doc.get("rag_metrics") or {}
+    fetched_status = doc.get("ticket_status")
+    closed_at = doc.get("closed_at")
+    status = None
+    if fetched_status:
+        status = str(fetched_status).lower()
+    if not status:
+        status = "closed" if closed_at else "open"
+
+    payload: Dict[str, Any] = {
+        "id": str(doc.get("_id")),
+        "ticket_id": doc.get("ticket_id"),
+        "user_id": doc.get("user_id"),
+        "persona": doc.get("persona"),
+        "status": status,
+        "ticket_status": fetched_status,
+        "escalation_reason": doc.get("escalation_reason"),
+        "created_at": _serialize_datetime(doc.get("created_at")),
+        "updated_at": _serialize_datetime(doc.get("updated_at")),
+        "closed_at": _serialize_datetime(closed_at),
+        "router_classification": doc.get("router_classification"),
+        "router_payload": doc.get("router_payload"),
+        "transcript": doc.get("transcript"),
+        "rag_metrics": rag_metrics,
+        "rag_chunks": doc.get("rag_chunks") or [],
+        "customer_updates": _serialize_updates(doc.get("customer_updates")),
+        "messages": _serialize_updates(doc.get("messages")),
+        "notes": doc.get("notes") or [],
+        "escalated_via": doc.get("escalated_via"),
+        "glpi_response": doc.get("escalation_response"),
+    }
+
+    glpi_details = doc.get("glpi_details") or {}
+    if glpi_details:
+        payload["glpi_details"] = glpi_details
+
+    if rag_metrics and "similarity_scores" in rag_metrics:
+        payload.setdefault("rag_metrics", {}).setdefault("similarity_scores", rag_metrics["similarity_scores"])
+
+    return payload
+
+
+def _find_ticket_document(identifier: str) -> Optional[Dict[str, Any]]:
+    if not identifier:
+        return None
+    doc_id = _parse_object_id(identifier)
+    if doc_id:
+        found = db[SUPPORT_ESCALATIONS_COL].find_one({"_id": doc_id})
+        if found:
+            return found
+    lookup_values = _ticket_lookup_values(identifier)
+    if lookup_values:
+        found = db[SUPPORT_ESCALATIONS_COL].find_one({"ticket_id": {"$in": lookup_values}})
+        if found:
+            return found
+    return None
+
+
+def _serialize_knowledge_article(
+    doc: Dict[str, Any],
+    *,
+    include_full_text: bool = False,
+    include_chunks: bool = False,
+) -> Dict[str, Any]:
+    if not doc:
+        return {}
+    full_text = doc.get("full_text") or ""
+    chunks = doc.get("chunks") or []
+    payload: Dict[str, Any] = {
+        "id": str(doc.get("_id")),
+        "persona": doc.get("persona"),
+        "title": doc.get("title"),
+        "summary": doc.get("summary"),
+        "tags": doc.get("tags") or [],
+        "audience": doc.get("audience"),
+        "source_ticket_id": doc.get("source_ticket_id"),
+        "auto_generated": doc.get("auto_generated", False),
+        "approved": doc.get("approved"),
+        "published_at": _serialize_datetime(doc.get("published_at")),
+        "approved_at": _serialize_datetime(doc.get("approved_at")),
+        "updated_at": _serialize_datetime(doc.get("updated_at")),
+        "chunk_count": len(chunks),
+        "preventive_actions": doc.get("preventive_actions") or [],
+        "faq": doc.get("faq") or [],
+        "resolution_outline": doc.get("resolution_outline") or [],
+        "validated_facts": doc.get("validated_facts") or [],
+    }
+    if include_full_text:
+        payload["full_text"] = full_text
+    else:
+        payload["full_text_preview"] = full_text[:400]
+    if include_chunks:
+        payload["chunks"] = chunks
+    return payload
+
+
+def _normalize_persona_name(value: Optional[str]) -> str:
+    persona = (value or DEFAULT_SUPPORT_PERSONA).strip().lower().replace(" ", "_")
+    return persona or DEFAULT_SUPPORT_PERSONA
+
+
+def _normalize_tags_list(value: Any) -> List[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        raw_values = re.split(r"[,\n]", value)
+    elif isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = [value]
+    tags: List[str] = []
+    for item in raw_values:
+        slug = re.sub(r"[^a-z0-9\-_ ]+", "", str(item).lower())
+        slug = slug.replace(" ", "_").strip("_-")
+        if not slug or slug in tags:
+            continue
+        tags.append(slug)
+        if len(tags) >= 10:
+            break
+    return tags
+
+
+def _normalize_outline(value: Any) -> List[Dict[str, Any]]:
+    if not value:
+        return []
+    items = value if isinstance(value, list) else [value]
+    outline: List[Dict[str, Any]] = []
+    for entry in items:
+        if isinstance(entry, dict):
+            title = (entry.get("title") or entry.get("section") or entry.get("heading") or "Step").strip()
+            details = (
+                entry.get("details")
+                or entry.get("text")
+                or entry.get("content")
+                or entry.get("body")
+                or ""
+            )
+            details = str(details).strip()
+            if details:
+                outline.append({"title": title, "details": details})
+        else:
+            text = str(entry).strip()
+            if text:
+                outline.append({"title": "Step", "details": text})
+    return outline
+
+
+def _normalize_str_list(value: Any) -> List[str]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        source = value
+    else:
+        source = [value]
+    normalized: List[str] = []
+    for entry in source:
+        text = str(entry).strip()
+        if text:
+            normalized.append(text)
+            if len(normalized) >= 20:
+                break
+    return normalized
+
+
+def _normalize_faq_entries(value: Any) -> List[Dict[str, Optional[str]]]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        source = value
+    else:
+        source = [value]
+    faqs: List[Dict[str, Optional[str]]] = []
+    for entry in source:
+        if isinstance(entry, dict):
+            question = entry.get("question") or entry.get("q") or entry.get("prompt")
+            answer = entry.get("answer") or entry.get("a") or entry.get("response")
+        else:
+            question = str(entry).strip()
+            answer = None
+        question_text = str(question).strip() if question else None
+        answer_text = str(answer).strip() if answer else None
+        if question_text or answer_text:
+            faqs.append({"question": question_text, "answer": answer_text})
+        if len(faqs) >= 20:
+            break
+    return faqs
+
+
+def _normalize_validated_facts(value: Any) -> List[Dict[str, Any]]:
+    if not value:
+        return []
+    if not isinstance(value, list):
+        value = [value]
+    facts: List[Dict[str, Any]] = []
+    for entry in value:
+        if isinstance(entry, dict):
+            fact_text = str(entry.get('fact') or entry.get('statement') or '').strip()
+            source_text = str(entry.get('source') or '').strip()
+            if not fact_text or not source_text:
+                continue
+            confidence = str(entry.get('confidence') or 'MEDIUM').upper()
+        else:
+            fact_text = str(entry).strip()
+            if not fact_text:
+                continue
+            source_text = "manual"
+            confidence = "LOW"
+        facts.append({
+            "fact": fact_text,
+            "source": source_text,
+            "confidence": confidence,
+        })
+        if len(facts) >= 50:
+            break
+    return facts
+
+
+def _persona_collection(persona: str):
+    return db[f"{PERSONA_COLLECTION_PREFIX}{persona}"]
+
+
+def _list_persona_slugs(filters: Optional[Set[str]] = None) -> List[str]:
+    try:
+        collection_names = db.list_collection_names()
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.error("Unable to enumerate persona collections: %s", exc)
+        return []
+    personas: List[str] = []
+    normalized_filters = {slug for slug in (filters or set()) if slug}
+    for name in collection_names:
+        if not name.startswith(PERSONA_COLLECTION_PREFIX):
+            continue
+        slug = name[len(PERSONA_COLLECTION_PREFIX):]
+        if normalized_filters and slug not in normalized_filters:
+            continue
+        personas.append(slug)
+    return sorted(personas)
+
+
+def _collect_glpi_article_summaries(persona: str, limit: int = 200) -> List[Dict[str, Any]]:
+    try:
+        pipeline = [
+            {"$match": {"doc_type": "knowledge_article"}},
+            {
+                "$project": {
+                    "title": 1,
+                    "summary": 1,
+                    "tags": 1,
+                    "audience": 1,
+                    "auto_generated": 1,
+                    "approved": 1,
+                    "source_ticket_id": 1,
+                    "source": 1,
+                    "published_at": 1,
+                    "updated_at": 1,
+                    "created_at": 1,
+                    "chunk_count": {
+                        "$size": {"$ifNull": ["$chunks", []]}
+                    },
+                }
+            },
+            {"$sort": {"updated_at": -1, "published_at": -1}},
+            {"$limit": limit},
+        ]
+        docs = list(_persona_collection(persona).aggregate(pipeline))
+    except errors.OperationFailure as exc:
+        logging.error("Failed to aggregate GLPI articles for persona %s: %s", persona, exc)
+        return []
+    summaries: List[Dict[str, Any]] = []
+    for entry in docs:
+        summaries.append(
+            {
+                "id": str(entry.get("_id")),
+                "persona": persona,
+                "title": entry.get("title"),
+                "summary": entry.get("summary"),
+                "tags": entry.get("tags") or [],
+                "audience": entry.get("audience"),
+                "auto_generated": entry.get("auto_generated", False),
+                "approved": entry.get("approved"),
+                "source_ticket_id": entry.get("source_ticket_id"),
+                "source": entry.get("source"),
+                "chunk_count": entry.get("chunk_count", 0),
+                "published_at": _serialize_datetime(entry.get("published_at")),
+                "updated_at": _serialize_datetime(entry.get("updated_at")),
+                "created_at": _serialize_datetime(entry.get("created_at")),
+            }
+        )
+    return summaries
+
+
+def _collect_gdrive_document_summaries(persona: str, limit: int = 500) -> List[Dict[str, Any]]:
+    try:
+        pipeline = [
+            {"$match": {"doc_type": "knowledge"}},
+            {
+                "$addFields": {
+                    "file_id_final": {
+                        "$ifNull": [
+                            "$file_id",
+                            {"$ifNull": ["$metadata.file_id", "$_id"]},
+                        ]
+                    },
+                    "filename_final": {
+                        "$ifNull": [
+                            "$metadata.filename",
+                            {
+                                "$ifNull": [
+                                    "$metadata.title",
+                                    {
+                                        "$ifNull": [
+                                            "$metadata.name",
+                                            "$file_id",
+                                        ]
+                                    },
+                                ]
+                            },
+                        ]
+                    },
+                    "source_final": {"$ifNull": ["$source", {"$ifNull": ["$metadata.source", "gdrive_upload"]}]},
+                    "tags_final": {"$ifNull": ["$metadata.tags", []]},
+                    "created_final": {"$ifNull": ["$created_at", "$metadata.created_at"]},
+                    "updated_final": {"$ifNull": ["$updated_at", "$metadata.updated_at"]},
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$file_id_final",
+                    "file_id": {"$first": "$file_id_final"},
+                    "filename": {"$first": "$filename_final"},
+                    "source": {"$first": "$source_final"},
+                    "tags": {"$first": "$tags_final"},
+                    "chunk_count": {"$sum": 1},
+                    "first_chunk": {"$first": "$content"},
+                    "updated_at": {"$max": "$updated_final"},
+                    "created_at": {"$min": "$created_final"},
+                }
+            },
+            {"$sort": {"updated_at": -1, "filename": 1}},
+            {"$limit": limit},
+        ]
+        docs = list(_persona_collection(persona).aggregate(pipeline))
+    except errors.OperationFailure as exc:
+        logging.error("Failed to aggregate GDrive knowledge for persona %s: %s", persona, exc)
+        return []
+
+    summaries: List[Dict[str, Any]] = []
+    for entry in docs:
+        tags_raw = entry.get("tags") or []
+        tags = []
+        if isinstance(tags_raw, list):
+            tags = [str(tag).strip() for tag in tags_raw if str(tag).strip()]
+        elif isinstance(tags_raw, str):
+            tags = [slug.strip() for slug in tags_raw.split(",") if slug.strip()]
+        summaries.append(
+            {
+                "file_id": str(entry.get("file_id")),
+                "persona": persona,
+                "filename": entry.get("filename"),
+                "source": entry.get("source"),
+                "chunk_count": entry.get("chunk_count", 0),
+                "content_preview": (entry.get("first_chunk") or "")[:400],
+                "tags": tags,
+                "updated_at": _serialize_datetime(entry.get("updated_at")),
+                "created_at": _serialize_datetime(entry.get("created_at")),
+            }
+        )
+    return summaries
+
+
+def _collect_ticket_metadata(limit_recent: int = 10) -> Dict[str, Any]:
+    collection = db[SUPPORT_ESCALATIONS_COL]
+    total_tickets = collection.count_documents({})
+    open_filter = {"$or": [{"closed_at": {"$exists": False}}, {"closed_at": None}]}
+    open_tickets = collection.count_documents(open_filter)
+    closed_tickets = collection.count_documents({"closed_at": {"$ne": None}})
+
+    persona_stats = list(
+        collection.aggregate(
+            [
+                {
+                    "$group": {
+                        "_id": {"$ifNull": ["$persona", DEFAULT_SUPPORT_PERSONA]},
+                        "total": {"$sum": 1},
+                        "open": {
+                            "$sum": {
+                                "$cond": [
+                                    {"$ifNull": ["$closed_at", False]},
+                                    0,
+                                    1,
+                                ]
+                            }
+                        },
+                        "closed": {
+                            "$sum": {
+                                "$cond": [
+                                    {"$ifNull": ["$closed_at", False]},
+                                    1,
+                                    0,
+                                ]
+                            }
+                        },
+                        "last_updated": {"$max": "$updated_at"},
+                    }
+                },
+                {"$sort": {"total": -1}},
+            ]
+        )
+    )
+
+    status_stats = list(
+        collection.aggregate(
+            [
+                {
+                    "$match": {"ticket_status": {"$exists": True, "$ne": None}},
+                },
+                {
+                    "$group": {
+                        "_id": {
+                            "$toLower": {
+                                "$trim": {
+                                    "input": {"$ifNull": ["$ticket_status", "unknown"]},
+                                }
+                            }
+                        },
+                        "count": {"$sum": 1},
+                    }
+                },
+                {"$sort": {"count": -1}},
+            ]
+        )
+    )
+
+    reason_stats = list(
+        collection.aggregate(
+            [
+                {
+                    "$match": {"escalation_reason": {"$exists": True, "$ne": None, "$ne": ""}},
+                },
+                {
+                    "$group": {
+                        "_id": "$escalation_reason",
+                        "count": {"$sum": 1},
+                    }
+                },
+                {"$sort": {"count": -1}},
+                {"$limit": 10},
+            ]
+        )
+    )
+
+    recent_cursor = collection.find({}, sort=[("updated_at", DESCENDING), ("created_at", DESCENDING)], limit=limit_recent)
+    recent_tickets = [_serialize_ticket_document(doc) for doc in recent_cursor]
+
+    persona_breakdown: List[Dict[str, Any]] = []
+    for entry in persona_stats:
+        persona_breakdown.append(
+            {
+                "persona": entry.get("_id"),
+                "total": entry.get("total", 0),
+                "open": entry.get("open", 0),
+                "closed": entry.get("closed", 0),
+                "last_updated": _serialize_datetime(entry.get("last_updated")),
+            }
+        )
+
+    status_breakdown: List[Dict[str, Any]] = []
+    for entry in status_stats:
+        status_label = entry.get("_id") or "unknown"
+        status_breakdown.append(
+            {
+                "status": status_label,
+                "count": entry.get("count", 0),
+            }
+        )
+
+    reason_breakdown: List[Dict[str, Any]] = []
+    for entry in reason_stats:
+        reason_breakdown.append(
+            {
+                "reason": entry.get("_id"),
+                "count": entry.get("count", 0),
+            }
+        )
+
+    return {
+        "summary": {
+            "total": total_tickets,
+            "open": open_tickets,
+            "closed": closed_tickets,
+            "open_ratio": (open_tickets / total_tickets) if total_tickets else 0.0,
+        },
+        "by_persona": persona_breakdown,
+        "by_status": status_breakdown,
+        "top_escalation_reasons": reason_breakdown,
+        "recent": recent_tickets,
+    }
+
+
+def _collect_gdrive_chunks(
+    persona: str,
+    file_identifier: str,
+    *,
+    limit: int,
+    offset: int,
+    include_embedding: bool = False,
+) -> Tuple[List[Dict[str, Any]], int]:
+    collection = _persona_collection(persona)
+
+    or_filters: List[Dict[str, Any]] = [{"file_id": file_identifier}]
+    if file_identifier.startswith("http"):
+        or_filters.append({"metadata.download_url": file_identifier})
+
+    doc_object_id = _parse_object_id(file_identifier)
+    if doc_object_id:
+        or_filters.append({"_id": doc_object_id})
+
+    or_filters.append({"metadata.file_id": file_identifier})
+    or_filters.append({"metadata.filename": file_identifier})
+
+    query = {"$and": [{"doc_type": "knowledge"}, {"$or": or_filters}]}
+
+    total = collection.count_documents(query)
+    cursor = (
+        collection
+        .find(query)
+        .sort([("chunk_index", ASCENDING), ("_id", ASCENDING)])
+        .skip(offset)
+        .limit(limit)
+    )
+
+    chunks: List[Dict[str, Any]] = []
+    for doc in cursor:
+        chunk_payload: Dict[str, Any] = {
+            "id": str(doc.get("_id")),
+            "chunk_index": doc.get("chunk_index"),
+            "content": doc.get("content"),
+            "content_preview": (doc.get("content") or "")[:280],
+            "metadata": doc.get("metadata") or {},
+            "file_id": doc.get("file_id") or doc.get("metadata", {}).get("file_id"),
+            "source": doc.get("source") or doc.get("metadata", {}).get("source"),
+            "updated_at": _serialize_datetime(doc.get("updated_at")),
+            "created_at": _serialize_datetime(doc.get("created_at")),
+        }
+        if include_embedding:
+            chunk_payload["embedding"] = doc.get("embedding")
+        chunks.append(chunk_payload)
+
+    return chunks, total
+
 # ==============================================================================
 # API
 # ==============================================================================
@@ -1996,6 +2566,369 @@ def healthcheck():
     }
     statuses["glpi"] = _cached_health_check("glpi", 120, _check_glpi)
     return jsonify(statuses)
+
+
+@app.route('/knowledge/articles', methods=['GET'])
+def list_knowledge_articles():
+    persona = _normalize_persona_name(request.args.get('persona'))
+    include_tokens = {
+        token.strip()
+        for token in (request.args.get('include') or '').lower().split(',')
+        if token.strip()
+    }
+    include_full_text = bool(include_tokens & {"full", "body", "full_text"})
+    include_chunks = "chunks" in include_tokens
+
+    limit_param = request.args.get('limit', '50')
+    offset_param = request.args.get('offset', '0')
+    try:
+        limit = max(1, min(int(limit_param), 200))
+        offset = max(0, int(offset_param))
+    except ValueError:
+        return jsonify({"error": "limit and offset must be integers"}), 400
+
+    query_filters: List[Dict[str, Any]] = [{"doc_type": "knowledge_article"}]
+    tag_params = request.args.getlist('tag')
+    raw_tags = request.args.get('tags')
+    if raw_tags:
+        tag_params.extend(part.strip() for part in raw_tags.split(',') if part.strip())
+    tags_filter = _normalize_tags_list(tag_params)
+    if tags_filter:
+        query_filters.append({"tags": {"$in": tags_filter}})
+
+    source_ticket_id = request.args.get('source_ticket_id')
+    if source_ticket_id:
+        query_filters.append({"source_ticket_id": source_ticket_id})
+
+    auto_generated_param = request.args.get('auto_generated')
+    if auto_generated_param is not None:
+        auto_flag = auto_generated_param.strip().lower() in {"1", "true", "yes", "on"}
+        query_filters.append({"auto_generated": auto_flag})
+
+    search_term = request.args.get('search')
+    if search_term:
+        regex = re.compile(re.escape(search_term), re.IGNORECASE)
+        query_filters.append({
+            "$or": [
+                {"title": {"$regex": regex}},
+                {"summary": {"$regex": regex}},
+                {"full_text": {"$regex": regex}},
+                {"tags": {"$elemMatch": {"$regex": regex}}},
+            ]
+        })
+
+    if len(query_filters) == 1:
+        query = query_filters[0]
+    else:
+        query = {"$and": query_filters}
+
+    collection = _persona_collection(persona)
+    cursor = (
+        collection
+        .find(query)
+        .sort([( "updated_at", DESCENDING), ("published_at", DESCENDING)])
+        .skip(offset)
+        .limit(limit)
+    )
+    articles = [
+        _serialize_knowledge_article(doc, include_full_text=include_full_text, include_chunks=include_chunks)
+        for doc in cursor
+    ]
+    total = collection.count_documents(query)
+    return jsonify({
+        "articles": articles,
+        "count": len(articles),
+        "total": total,
+        "persona": persona,
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+@app.route('/knowledge/articles', methods=['POST'])
+def create_knowledge_article():
+    payload = request.get_json() or {}
+    persona = _normalize_persona_name(payload.get('persona') or payload.get('target_persona'))
+    title = (payload.get('title') or '').strip()
+    summary = (payload.get('summary') or '').strip()
+    full_text = (payload.get('full_text') or payload.get('body') or '').strip()
+    if not full_text:
+        return jsonify({"error": "full_text is required"}), 400
+    if not summary:
+        summary = full_text[:280].strip()
+    if not title:
+        title = summary or "Untitled Article"
+
+    tags = _normalize_tags_list(payload.get('tags') or payload.get('labels'))
+    audience = (payload.get('audience') or "internal").strip().lower() or "internal"
+    faq_entries = _normalize_faq_entries(payload.get('faq') or payload.get('faqs'))
+    outline = _normalize_outline(payload.get('resolution_outline') or payload.get('outline'))
+    preventive_actions = _normalize_str_list(payload.get('preventive_actions') or payload.get('recommendations'))
+
+    validated_facts = _normalize_validated_facts(payload.get('validated_facts'))
+
+    chunk_texts = _split_text_for_embeddings(full_text)
+    if not chunk_texts:
+        return jsonify({
+            "error": "full_text did not contain any content to chunk",
+        }), 400
+
+    try:
+        chunk_embeddings = build_embeddings(chunk_texts)
+    except Exception as exc:  # pragma: no cover - external service call
+        logging.error("Embedding generation failed while creating article: %s", exc, exc_info=True)
+        chunk_embeddings = [None] * len(chunk_texts)
+
+    summary_embedding: Optional[List[float]] = None
+    if summary:
+        try:
+            summary_embedding = build_embeddings([summary])[0]
+        except Exception as exc:  # pragma: no cover - external service call
+            logging.warning("Summary embedding generation failed: %s", exc)
+
+    chunk_records: List[Dict[str, Any]] = []
+    for idx, chunk in enumerate(chunk_texts):
+        embedding = chunk_embeddings[idx] if idx < len(chunk_embeddings) else None
+        chunk_records.append({
+            "chunk_index": idx,
+            "content": chunk,
+            "content_preview": chunk[:280],
+            "embedding": embedding,
+        })
+
+    now_ts = datetime.now(timezone.utc)
+    article_id = ObjectId()
+    article_doc = {
+        "_id": article_id,
+        "doc_type": "knowledge_article",
+        "persona": persona,
+        "title": title,
+        "summary": summary or title,
+        "audience": audience,
+        "tags": tags,
+        "faq": faq_entries,
+        "resolution_outline": outline,
+        "preventive_actions": preventive_actions,
+        "full_text": full_text,
+        "chunks": chunk_records,
+        "article_embedding": summary_embedding,
+        "source_ticket_id": payload.get('source_ticket_id') or payload.get('ticket_id'),
+        "ticket_transcript": payload.get('ticket_transcript') or payload.get('transcript_excerpt'),
+        "validated_facts": validated_facts,
+        "published_at": now_ts,
+        "approved_at": now_ts,
+        "updated_at": now_ts,
+        "created_at": now_ts,
+        "auto_generated": False,
+        "approved": payload.get('approval_mode') or 'manual',
+        "source": payload.get('source') or 'manual_entry',
+        "created_by": payload.get('created_by') or payload.get('author'),
+    }
+    collection = _persona_collection(persona)
+    collection.replace_one({"_id": article_id}, article_doc, upsert=True)
+    return jsonify(_serialize_knowledge_article(article_doc, include_full_text=True)), 201
+
+
+@app.route('/knowledge/articles/<article_id>', methods=['PUT'])
+def update_knowledge_article(article_id: str):
+    payload = request.get_json() or {}
+    persona = _normalize_persona_name(
+        payload.get('persona') or request.args.get('persona') or payload.get('target_persona')
+    )
+    article_obj_id = _parse_object_id(article_id)
+    if not article_obj_id:
+        return jsonify({"error": "invalid article id"}), 400
+
+    collection = _persona_collection(persona)
+    existing = collection.find_one({"_id": article_obj_id, "doc_type": "knowledge_article"})
+    if not existing:
+        return jsonify({"error": "article not found"}), 404
+
+    updates: Dict[str, Any] = {}
+    now_ts = datetime.now(timezone.utc)
+
+    if 'title' in payload:
+        updates['title'] = (payload.get('title') or existing.get('title') or '').strip() or existing.get('title')
+    if 'audience' in payload:
+        updates['audience'] = (payload.get('audience') or existing.get('audience') or 'internal').strip().lower()
+    if 'tags' in payload or 'labels' in payload:
+        updates['tags'] = _normalize_tags_list(payload.get('tags') or payload.get('labels'))
+    if 'faq' in payload or 'faqs' in payload:
+        updates['faq'] = _normalize_faq_entries(payload.get('faq') or payload.get('faqs'))
+    if 'resolution_outline' in payload or 'outline' in payload:
+        updates['resolution_outline'] = _normalize_outline(payload.get('resolution_outline') or payload.get('outline'))
+    if 'preventive_actions' in payload or 'recommendations' in payload:
+        updates['preventive_actions'] = _normalize_str_list(payload.get('preventive_actions') or payload.get('recommendations'))
+    if 'ticket_transcript' in payload or 'transcript_excerpt' in payload:
+        updates['ticket_transcript'] = payload.get('ticket_transcript') or payload.get('transcript_excerpt')
+    if 'validated_facts' in payload:
+        updates['validated_facts'] = _normalize_validated_facts(payload.get('validated_facts'))
+    if 'approved' in payload:
+        updates['approved'] = payload.get('approved')
+    if 'auto_generated' in payload:
+        updates['auto_generated'] = bool(payload.get('auto_generated'))
+    if 'source_ticket_id' in payload:
+        updates['source_ticket_id'] = payload.get('source_ticket_id')
+
+    # Summary / full text updates may require re-embedding
+    new_summary = payload.get('summary')
+    new_full_text = payload.get('full_text') or payload.get('body')
+    recalc_embeddings = False
+
+    if new_summary is not None:
+        summary_text = str(new_summary).strip()
+        if not summary_text:
+            summary_text = existing.get('summary') or existing.get('title') or ''
+        updates['summary'] = summary_text
+        recalc_embeddings = True
+    if new_full_text is not None:
+        full_text_value = str(new_full_text).strip()
+        if not full_text_value:
+            return jsonify({"error": "full_text cannot be empty"}), 400
+        updates['full_text'] = full_text_value
+        recalc_embeddings = True
+
+    if recalc_embeddings:
+        summary_text = updates.get('summary') or existing.get('summary') or existing.get('title') or ''
+        full_text_value = updates.get('full_text') or existing.get('full_text') or ''
+        chunk_texts = _split_text_for_embeddings(full_text_value)
+        if not chunk_texts:
+            return jsonify({"error": "full_text did not contain any content to chunk"}), 400
+        try:
+            chunk_embeddings = build_embeddings(chunk_texts)
+        except Exception as exc:  # pragma: no cover - external service call
+            logging.error("Embedding regeneration failed for article %s: %s", article_id, exc, exc_info=True)
+            chunk_embeddings = [None] * len(chunk_texts)
+        summary_embedding: Optional[List[float]] = None
+        if summary_text:
+            try:
+                summary_embedding = build_embeddings([summary_text])[0]
+            except Exception as exc:  # pragma: no cover - external service call
+                logging.warning("Summary embedding regeneration failed for article %s: %s", article_id, exc)
+        chunk_records: List[Dict[str, Any]] = []
+        for idx, chunk in enumerate(chunk_texts):
+            embedding = chunk_embeddings[idx] if idx < len(chunk_embeddings) else None
+            chunk_records.append({
+                "chunk_index": idx,
+                "content": chunk,
+                "content_preview": chunk[:280],
+                "embedding": embedding,
+            })
+        updates['chunks'] = chunk_records
+        updates['article_embedding'] = summary_embedding
+
+    if not updates:
+        return jsonify({"error": "no supported fields provided"}), 400
+
+    updates['updated_at'] = now_ts
+    collection.update_one({"_id": article_obj_id}, {"$set": updates})
+    refreshed = collection.find_one({"_id": article_obj_id})
+    return jsonify(_serialize_knowledge_article(refreshed, include_full_text=True))
+
+
+@app.route('/knowledge/catalog', methods=['GET'])
+def knowledge_catalog_endpoint():
+    persona_params = request.args.getlist('persona') + request.args.getlist('personas')
+    persona_csv = request.args.get('personas')
+    if persona_csv:
+        persona_params.extend([part.strip() for part in persona_csv.split(',') if part.strip()])
+    persona_filters: Set[str] = set()
+    for value in persona_params:
+        if value and value.strip():
+            persona_filters.add(_normalize_persona_name(value))
+
+    glpi_limit_param = request.args.get('glpi_limit')
+    gdrive_limit_param = request.args.get('gdrive_limit')
+    try:
+        glpi_limit = max(1, min(int(glpi_limit_param), 1000)) if glpi_limit_param else 200
+        gdrive_limit = max(1, min(int(gdrive_limit_param), 1000)) if gdrive_limit_param else 500
+    except ValueError:
+        return jsonify({"error": "glpi_limit and gdrive_limit must be integers"}), 400
+
+    personas = _list_persona_slugs(persona_filters)
+    if not personas:
+        return jsonify({"personas": [], "totals": {"glpi_articles": 0, "gdrive_documents": 0, "gdrive_chunks": 0}})
+
+    catalog: List[Dict[str, Any]] = []
+    total_glpi = 0
+    total_gdrive_docs = 0
+    total_gdrive_chunks = 0
+
+    for persona in personas:
+        glpi_articles = _collect_glpi_article_summaries(persona, limit=glpi_limit)
+        gdrive_docs = _collect_gdrive_document_summaries(persona, limit=gdrive_limit)
+        persona_chunk_total = sum(doc.get('chunk_count', 0) for doc in gdrive_docs)
+        total_glpi += len(glpi_articles)
+        total_gdrive_docs += len(gdrive_docs)
+        total_gdrive_chunks += persona_chunk_total
+        catalog.append(
+            {
+                "persona": persona,
+                "counts": {
+                    "glpi_articles": len(glpi_articles),
+                    "gdrive_documents": len(gdrive_docs),
+                    "gdrive_chunks": persona_chunk_total,
+                },
+                "glpi_articles": glpi_articles,
+                "gdrive_documents": gdrive_docs,
+            }
+        )
+
+    return jsonify(
+        {
+            "personas": catalog,
+            "totals": {
+                "glpi_articles": total_glpi,
+                "gdrive_documents": total_gdrive_docs,
+                "gdrive_chunks": total_gdrive_chunks,
+            },
+        }
+    )
+
+
+@app.route('/knowledge/documents/<file_id>/chunks', methods=['GET'])
+def knowledge_document_chunks(file_id: str):
+    if not file_id:
+        return jsonify({"error": "file_id is required"}), 400
+    persona_param = request.args.get('persona') or request.args.get('persona_slug')
+    persona = _normalize_persona_name(persona_param)
+    if not persona_param:
+        return jsonify({"error": "persona query parameter is required"}), 400
+
+    include_tokens = {
+        token.strip()
+        for token in (request.args.get('include') or '').lower().split(',')
+        if token.strip()
+    }
+    include_embedding = "embedding" in include_tokens or "embeddings" in include_tokens
+
+    limit_param = request.args.get('limit', '200')
+    offset_param = request.args.get('offset', '0')
+    try:
+        limit = max(1, min(int(limit_param), 500))
+        offset = max(0, int(offset_param))
+    except ValueError:
+        return jsonify({"error": "limit and offset must be integers"}), 400
+
+    chunks, total = _collect_gdrive_chunks(
+        persona,
+        file_id,
+        limit=limit,
+        offset=offset,
+        include_embedding=include_embedding,
+    )
+
+    response = {
+        "persona": persona,
+        "file_id": file_id,
+        "chunks": chunks,
+        "count": len(chunks),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": bool(offset + len(chunks) < total),
+    }
+    return jsonify(response)
 
 
 @app.route('/knowledge/queue', methods=['GET'])
@@ -2033,6 +2966,21 @@ def approve_knowledge_queue_item(item_id: str):
     return jsonify(result)
 
 
+@app.route('/knowledge/queue/<item_id>/reject', methods=['POST'])
+def reject_knowledge_queue_item(item_id: str):
+    queue_id = _parse_object_id(item_id)
+    if not queue_id:
+        return jsonify({"error": "invalid queue id"}), 400
+    payload = request.get_json() or {}
+    reviewer = payload.get("reviewer") or payload.get("actor") or "manual_reviewer"
+    reason = payload.get("reason") or payload.get("note") or payload.get("comment")
+    try:
+        result = knowledge_pipeline.reject_queue_item(queue_id, reviewer, reason)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
+
+
 @app.route('/personas', methods=['GET'])
 def list_personas():
     """Return the list of personas currently synced into MongoDB."""
@@ -2063,6 +3011,369 @@ def ticket_router_endpoint():
     metadata = data.get('metadata') or {}
     result = ticket_router.route_ticket(persona, ticket_text, ticket_id=ticket_id, metadata=metadata)
     return jsonify(result)
+
+
+@app.route('/tickets', methods=['GET'])
+def list_tickets_endpoint():
+    limit_param = request.args.get('limit', '50')
+    try:
+        limit = max(1, min(int(limit_param), 200))
+    except ValueError:
+        return jsonify({"error": "limit must be a valid integer"}), 400
+
+    persona = request.args.get('persona')
+    status_filter = request.args.get('status')
+    user_id = request.args.get('user_id')
+    search_term = request.args.get('search')
+
+    filters: List[Dict[str, Any]] = []
+    if persona:
+        filters.append({"persona": persona.lower().replace(' ', '_')})
+    if user_id:
+        filters.append({"user_id": user_id})
+    if status_filter:
+        lower_status = status_filter.lower()
+        if lower_status == 'open':
+            filters.append({"$or": [{"closed_at": {"$exists": False}}, {"closed_at": None}]})
+        elif lower_status == 'closed':
+            filters.append({"closed_at": {"$ne": None}})
+        else:
+            return jsonify({"error": "status must be 'open' or 'closed'"}), 400
+    if search_term:
+        regex = re.compile(re.escape(search_term), re.IGNORECASE)
+        filters.append({
+            "$or": [
+                {"escalation_reason": regex},
+                {"transcript": regex},
+                {"user_id": regex},
+                {"persona": regex},
+            ]
+        })
+
+    if not filters:
+        query: Dict[str, Any] = {}
+    elif len(filters) == 1:
+        query = filters[0]
+    else:
+        query = {"$and": filters}
+
+    cursor = (
+        db[SUPPORT_ESCALATIONS_COL]
+        .find(query)
+        .sort("created_at", DESCENDING)
+        .limit(limit)
+    )
+    tickets = [_serialize_ticket_document(doc) for doc in cursor]
+    total = db[SUPPORT_ESCALATIONS_COL].count_documents(query)
+    return jsonify({"tickets": tickets, "count": len(tickets), "total": total})
+
+
+@app.route('/tickets/metadata', methods=['GET'])
+def tickets_metadata_endpoint():
+    recent_param = request.args.get('recent', request.args.get('limit', '10'))
+    try:
+        recent_limit = max(1, min(int(recent_param), 50))
+    except ValueError:
+        return jsonify({"error": "recent must be an integer"}), 400
+    metadata = _collect_ticket_metadata(limit_recent=recent_limit)
+    metadata.setdefault("summary", {}).setdefault("recent_limit", recent_limit)
+    return jsonify(metadata)
+
+
+@app.route('/tickets/<ticket_id>', methods=['GET'])
+def get_ticket_endpoint(ticket_id: str):
+    doc = _find_ticket_document(ticket_id)
+    if not doc:
+        return jsonify({"error": "ticket not found"}), 404
+    return jsonify(_serialize_ticket_document(doc))
+
+
+@app.route('/tickets/<ticket_id>/messages', methods=['POST'])
+def append_ticket_message(ticket_id: str):
+    doc = _find_ticket_document(ticket_id)
+    if not doc:
+        return jsonify({"error": "ticket not found"}), 404
+    data = request.get_json() or {}
+    message = (data.get('message') or '').strip()
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+    sender = (data.get('sender') or 'user').strip().lower()
+    now_ts = datetime.now(timezone.utc)
+    message_entry = {
+        "timestamp": now_ts,
+        "sender": sender,
+        "message": message,
+        "user_id": data.get('user_id') or doc.get('user_id'),
+    }
+
+    update_doc: Dict[str, Any] = {
+        "$set": {"updated_at": now_ts},
+        "$push": {"messages": message_entry},
+    }
+
+    db[SUPPORT_ESCALATIONS_COL].update_one({"_id": doc["_id"]}, update_doc)
+
+    if sender in {"user", "customer"}:
+        try:
+            _append_ticket_followup(
+                data.get('user_id') or doc.get('user_id') or "",
+                doc.get('persona') or DEFAULT_SUPPORT_PERSONA,
+                doc.get('ticket_id'),
+                message,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning("Failed to append ticket follow-up: %s", exc)
+        ticket_identifier = doc.get('ticket_id')
+        if glpi_escalation_manager and ticket_identifier:
+            try:
+                glpi_escalation_manager.send_customer_response(ticket_identifier, message)
+            except Exception as exc:  # pragma: no cover - defensive
+                logging.warning("Failed to forward update to GLPI ticket %s: %s", ticket_identifier, exc)
+
+    updated = db[SUPPORT_ESCALATIONS_COL].find_one({"_id": doc["_id"]})
+    return jsonify(_serialize_ticket_document(updated)), 201
+
+
+@app.route('/tickets/<ticket_id>', methods=['PATCH'])
+def patch_ticket_endpoint(ticket_id: str):
+    doc = _find_ticket_document(ticket_id)
+    if not doc:
+        return jsonify({"error": "ticket not found"}), 404
+    data = request.get_json() or {}
+
+    updates: Dict[str, Any] = {}
+    unset_ops: Dict[str, Any] = {}
+    notes_entry: Optional[Dict[str, Any]] = None
+    status_value = data.get('status')
+    assignee = data.get('assignee') or data.get('assignment')
+    notes = data.get('note') or data.get('notes')
+
+    now_ts = datetime.now(timezone.utc)
+    updates['updated_at'] = now_ts
+
+    if status_value:
+        updates['ticket_status'] = status_value
+        if str(status_value).lower() in {'resolved', 'closed', 'done'}:
+            updates['closed_at'] = now_ts
+        elif str(status_value).lower() in {'open', 'reopened'}:
+            unset_ops['closed_at'] = ""
+
+    if assignee:
+        updates['assigned_to'] = assignee
+
+    if notes:
+        notes_entry = {
+            "timestamp": now_ts,
+            "author": data.get('author') or 'system',
+            "note": notes,
+        }
+
+    if not updates and not unset_ops and not notes_entry:
+        return jsonify({"error": "no supported fields provided"}), 400
+
+    update_doc: Dict[str, Any] = {"$set": updates}
+    if unset_ops:
+        update_doc["$unset"] = unset_ops
+    if notes_entry:
+        update_doc.setdefault("$push", {})["notes"] = notes_entry
+
+    db[SUPPORT_ESCALATIONS_COL].update_one({"_id": doc["_id"]}, update_doc)
+    refreshed = db[SUPPORT_ESCALATIONS_COL].find_one({"_id": doc["_id"]})
+    return jsonify(_serialize_ticket_document(refreshed))
+
+
+@app.route('/tickets/<ticket_id>/escalate', methods=['POST'])
+def escalate_ticket_endpoint(ticket_id: str):
+    doc = _find_ticket_document(ticket_id)
+    data = request.get_json() or {}
+    reason = (data.get('reason') or (doc or {}).get('escalation_reason') or 'manual_escalation').strip()
+    user_message = data.get('user_message') or data.get('summary') or (doc or {}).get('transcript', '')
+    conversation_context = data.get('conversation_context') or (doc or {}).get('transcript') or user_message
+    retrieved_chunks = data.get('retrieved_chunks') or (doc or {}).get('rag_chunks') or []
+    similarity_scores = data.get('similarity_scores') or ((doc or {}).get('rag_metrics') or {}).get('similarity_scores') or []
+
+    if not doc:
+        user_id = (data.get('user_id') or '').strip()
+        persona = (data.get('persona') or DEFAULT_SUPPORT_PERSONA).strip().lower().replace(' ', '_')
+        if not user_id:
+            return jsonify({"error": "user_id is required when ticket record does not exist"}), 400
+        history = data.get('history') if isinstance(data.get('history'), list) else []
+        router_payload = data.get('router')
+        rag_context = data.get('rag_context') or {
+            "chunks": retrieved_chunks,
+            "metrics": {"similarity_scores": similarity_scores},
+        }
+        new_ticket_id = record_escalation_case(
+            user_id,
+            persona,
+            history,
+            user_message or reason,
+            router_payload,
+            rag_context=rag_context,
+            escalation_reason=reason,
+            assistant_reply=data.get('assistant_reply'),
+        )
+        created_doc: Optional[Dict[str, Any]] = None
+        if new_ticket_id is not None:
+            created_doc = _find_ticket_document(str(new_ticket_id)) or db[SUPPORT_ESCALATIONS_COL].find_one(
+                {"ticket_id": str(new_ticket_id)}
+            )
+        if created_doc is None:
+            created_doc = db[SUPPORT_ESCALATIONS_COL].find_one(
+                {"user_id": user_id, "persona": persona},
+                sort=[("created_at", DESCENDING)],
+            )
+        if not created_doc:
+            return jsonify({"error": "escalation created ticket but record could not be retrieved"}), 500
+        return jsonify({
+            "status": "escalated",
+            "ticket": _serialize_ticket_document(created_doc),
+        }), 201
+
+    if doc.get('ticket_id'):
+        return jsonify({"status": "already_escalated", "ticket": _serialize_ticket_document(doc)})
+
+    escalation_response: Optional[Dict[str, Any]] = None
+    escalated_via = 'local'
+    ticket_identifier: Optional[Any] = None
+
+    if glpi_escalation_manager:
+        try:
+            escalation_response = glpi_escalation_manager.create_escalation_ticket(
+                user_query=user_message or reason,
+                escalation_reason=reason,
+                retrieved_chunks=retrieved_chunks,
+                similarity_scores=similarity_scores,
+                conversation_context=conversation_context,
+            )
+            ticket_identifier = escalation_response.get('ticket_id')
+            escalated_via = 'glpi_manager'
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.error("GLPI escalation manager failed: %s", exc, exc_info=True)
+    elif glpi_client:
+        payload = {
+            "name": f"[Manual Escalation] {reason[:60] or 'Support case'}",
+            "content": conversation_context or user_message or reason,
+            "status": 1,
+            "type": 1,
+            "urgency": 3,
+            "impact": 3,
+        }
+        try:
+            response = glpi_client.create_ticket(payload)
+            ticket_identifier = response.get('id') or response.get('ticket_id')
+            escalation_response = response
+            escalated_via = 'glpi_client'
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.error("GLPI client escalation failed: %s", exc, exc_info=True)
+
+    if ticket_identifier is None:
+        ticket_identifier = data.get('external_ticket_id') or str(uuid.uuid4())
+
+    now_ts = datetime.now(timezone.utc)
+    update_doc: Dict[str, Any] = {
+        "$set": {
+            "ticket_id": str(ticket_identifier),
+            "escalation_reason": reason,
+            "updated_at": now_ts,
+            "ticket_status": data.get('status') or 'open',
+            "escalated_via": escalated_via,
+        }
+    }
+    if escalation_response is not None:
+        update_doc["$set"]["escalation_response"] = escalation_response
+
+    db[SUPPORT_ESCALATIONS_COL].update_one({"_id": doc["_id"]}, update_doc)
+    refreshed = db[SUPPORT_ESCALATIONS_COL].find_one({"_id": doc["_id"]})
+    return jsonify({"status": "escalated", "ticket": _serialize_ticket_document(refreshed)})
+
+
+@app.route('/chat/history', methods=['GET'])
+def chat_history_endpoint():
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+    limit_param = request.args.get('limit', '50')
+    try:
+        limit = max(1, min(int(limit_param), 500))
+    except ValueError:
+        return jsonify({"error": "limit must be a valid integer"}), 400
+    match_filter = {"user_id": user_id}
+    since_param = request.args.get('since')
+    since_dt = None
+    if since_param:
+        since_dt = _parse_possible_datetime(since_param)
+        if since_dt:
+            match_filter["timestamp"] = {"$gte": since_dt}
+
+    cursor = (
+        db[CHAT_HISTORY_COL]
+        .find(match_filter)
+        .sort("timestamp", DESCENDING)
+        .limit(limit)
+    )
+    rows = list(cursor)
+    rows.reverse()
+    messages = [
+        {
+            "role": row.get('role'),
+            "content": row.get('content'),
+            "timestamp": _serialize_datetime(row.get('timestamp')),
+        }
+        for row in rows
+    ]
+    return jsonify({"user_id": user_id, "messages": messages, "count": len(messages)})
+
+
+@app.route('/chat/sessions', methods=['GET'])
+def chat_sessions_endpoint():
+    limit_param = request.args.get('limit', '50')
+    try:
+        limit = max(1, min(int(limit_param), 500))
+    except ValueError:
+        return jsonify({"error": "limit must be a valid integer"}), 400
+
+    since_param = request.args.get('since')
+    match_stage: Dict[str, Any] = {}
+    since_dt = None
+    if since_param:
+        since_dt = _parse_possible_datetime(since_param)
+        if since_dt:
+            match_stage['timestamp'] = {'$gte': since_dt}
+
+    pipeline: List[Dict[str, Any]] = []
+    if match_stage:
+        pipeline.append({"$match": match_stage})
+    pipeline.extend([
+        {
+            "$group": {
+                "_id": "$user_id",
+                "last_message_at": {"$max": "$timestamp"},
+                "message_count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"last_message_at": -1}},
+        {"$limit": limit},
+    ])
+
+    sessions_raw = list(db[CHAT_HISTORY_COL].aggregate(pipeline))
+    sessions: List[Dict[str, Any]] = []
+    for row in sessions_raw:
+        user = row.get('_id')
+        last_ts = _serialize_datetime(row.get('last_message_at'))
+        profile = db[USER_PROFILES_COL].find_one({"user_id": user}, {"_id": 0, "tone_observed": 1, "active_tickets": 1, "last_glpi_ticket_id": 1})
+        sessions.append(
+            {
+                "user_id": user,
+                "last_message_at": last_ts,
+                "message_count": row.get('message_count', 0),
+                "active_tickets": (profile or {}).get('active_tickets'),
+                "tone_observed": (profile or {}).get('tone_observed'),
+                "last_glpi_ticket_id": (profile or {}).get('last_glpi_ticket_id'),
+            }
+        )
+
+    return jsonify({"sessions": sessions, "count": len(sessions)})
 
 
 @app.route('/analytics/trends', methods=['GET'])
