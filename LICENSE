@@ -1,0 +1,147 @@
+NOTICE: NOT OPEN SOURCE
+
+Copyright © 2025 Obvix Labs (obvix.io)
+All Rights Reserved.
+
+================================================================================
+PROJECT: Obvix Lake
+DEVELOPED BY: Obvix Labs
+WEBSITE: https://obvix.io
+================================================================================
+
+IMPORTANT NOTICE TO USERS
+
+This repository has been made public for submission and demonstration purposes 
+ONLY. The fact that this code is publicly visible does NOT mean it is 
+open-source, free to use, or available for redistribution.
+
+THIS IS NOT AN OPEN-SOURCE PROJECT.
+
+This project and all associated code, documentation, and resources are the 
+property of Obvix Labs. By accessing this repository, you agree to the 
+following terms:
+
+--------------------------------------------------------------------------------
+1. NO LICENSE GRANTED
+--------------------------------------------------------------------------------
+
+No license, express or implied, is granted to any person accessing this 
+repository. The code is made publicly visible solely for:
+- Academic/professional submission requirements
+- Demonstration and portfolio purposes
+- Evaluation by authorized parties
+
+Making this repository public does NOT constitute:
+- A grant of rights to use, copy, modify, or distribute the code
+- An open-source license of any kind
+- Permission to incorporate this code into other projects
+- A waiver of any rights by Obvix Labs
+
+--------------------------------------------------------------------------------
+2. RESTRICTIONS ON USE
+--------------------------------------------------------------------------------
+
+You may NOT:
+- Use this code in your own projects (commercial or personal)
+- Copy, fork, or clone this repository for use beyond viewing
+- Modify, adapt, or create derivative works
+- Redistribute, sublicense, or share this code
+- Use this code for any commercial purposes
+- Repurpose any part of this code for other applications
+- Claim this work as your own
+
+You MAY:
+- View the code for educational purposes
+- Reference this project in discussions (with proper attribution)
+- Review the code as part of an authorized evaluation process
+
+--------------------------------------------------------------------------------
+3. PROJECT STATUS
+--------------------------------------------------------------------------------
+
+This project was developed as part of Obvix Labs' internal initiatives. While 
+we have made it publicly accessible for specific submission requirements, all 
+rights remain with Obvix Labs.
+
+--------------------------------------------------------------------------------
+3. THIRD-PARTY COMPONENTS
+--------------------------------------------------------------------------------
+
+This Software incorporates or depends upon certain third-party open-source 
+software components. While this Software itself is NOT open-source and remains 
+proprietary to Obvix Labs, we acknowledge the following open-source projects 
+that this Software utilizes:
+
+BACKEND DEPENDENCIES:
+- Flask (BSD-3-Clause License)
+- Flask-Cors (MIT License)
+- OpenAI Python SDK (Apache-2.0 License)
+- PyMongo (Apache-2.0 License)
+- python-dotenv (BSD-3-Clause License)
+- NumPy (BSD-3-Clause License)
+- transitions (MIT License)
+- requests (Apache-2.0 License)
+- scikit-learn (BSD-3-Clause License)
+- python-dateutil (Apache-2.0 License/BSD-3-Clause License)
+- PyPDF (BSD-3-Clause License)
+- docling (MIT License)
+- Google API Python Client (Apache-2.0 License)
+- google-auth (Apache-2.0 License)
+
+FRONTEND DEPENDENCIES:
+- React (MIT License)
+- React Router DOM (MIT License)
+- Vite (MIT License)
+- TypeScript (Apache-2.0 License)
+- Tailwind CSS (MIT License)
+- Framer Motion (MIT License)
+- XState (MIT License)
+- Zustand (MIT License)
+- Lucide React (ISC License)
+- ESLint (MIT License)
+- Prettier (MIT License)
+
+The use of these third-party components is in accordance with their respective 
+licenses. The inclusion of these components does NOT make this Software 
+open-source. All custom code, integrations, configurations, and proprietary 
+implementations remain the exclusive property of Obvix Labs.
+
+--------------------------------------------------------------------------------
+4. DISCLAIMER
+--------------------------------------------------------------------------------
+
+THE CODE IS PROVIDED "AS IS" FOR VIEWING PURPOSES ONLY. OBVIX LABS MAKES NO 
+WARRANTIES OR REPRESENTATIONS ABOUT THE SUITABILITY, RELIABILITY, OR ACCURACY 
+OF THIS CODE FOR ANY PURPOSE.
+
+USE OF THIS CODE IS ENTIRELY AT YOUR OWN RISK. OBVIX LABS SHALL NOT BE LIABLE 
+FOR ANY DAMAGES OR ISSUES ARISING FROM UNAUTHORIZED USE OF THIS CODE.
+
+--------------------------------------------------------------------------------
+5. TAKEDOWN NOTICE
+--------------------------------------------------------------------------------
+
+Obvix Labs reserves the right to make this repository private or remove it 
+entirely at any time without notice.
+
+--------------------------------------------------------------------------------
+6. CONTACT INFORMATION
+--------------------------------------------------------------------------------
+
+If you have questions about this project or would like to request permission 
+for specific use cases, please contact:
+
+Obvix Labs
+Website: https://obvix.io
+Karan Prasad (Founder & CEO)
+hello@karanprasad.com
+
+================================================================================
+
+SUMMARY: This repository is public for submission purposes only. It is NOT 
+open-source. You may view the code, but you may NOT use, copy, modify, or 
+distribute it without explicit written permission from Obvix Labs.
+
+IF YOU WISH TO USE THIS CODE, YOU MUST CONTACT OBVIX LABS FOR PERMISSION.
+
+================================================================================
